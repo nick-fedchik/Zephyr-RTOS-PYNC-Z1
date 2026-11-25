@@ -21,6 +21,9 @@ and `ENTRY_ADDR` for `go`):
 
 ```sh
 ./setup_and_build.sh
+# optional: enable two-stage TFTP netboot (U-Boot uses DHCP unless BOARD_IP is set)
+./setup_and_build.sh --tftp-server 192.168.1.10
+# or put persistent overrides (TFTP_SERVER_IP, BOARD_IP, BOARD_MAC, ...) in git-ignored local.conf
 # or reuse a local PYNQ-Z1 archive/image, or skip image download:
 ./setup_and_build.sh --pynq-image /path/to/pynq_z1_v3.1.1.zip
 ./setup_and_build.sh --skip-pynq-image

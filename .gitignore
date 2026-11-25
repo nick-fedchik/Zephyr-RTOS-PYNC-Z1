@@ -1,3 +1,4 @@
+local.conf
 .venv/
 .tools/
 zephyr-ws/

@@ -8,32 +8,47 @@ ZEPHYR_WS="$WORK_DIR/zephyr-ws"
 BUILD_DIR="$WORK_DIR/build"
 SD_DIR="$WORK_DIR/sd_card_files"
 
+if [[ -f "$WORK_DIR/local.conf" ]]; then
+	# shellcheck disable=SC1091
+	source "$WORK_DIR/local.conf"
+fi
+
 ZEPHYR_VER="${ZEPHYR_VER:-v4.5.0}"
 SDK_VER="${SDK_VER:-1.0.1}"
 PYNQ_ZIP_URL="${PYNQ_ZIP_URL:-https://download.amd.com/opendownload/pynq/pynq_z1_v3.1.1.zip}"
 PYNQ_IMAGE_PATH="${PYNQ_IMAGE_PATH:-}"
 SKIP_PYNQ_IMAGE=0
 
-TFTP_SERVER_IP="${TFTP_SERVER_IP:-192.168.68.57}"
-BOARD_IP="${BOARD_IP:-192.168.68.81}"
-BOARD_NETMASK="${BOARD_NETMASK:-255.255.252.0}"
-BOARD_GW="${BOARD_GW:-192.168.68.1}"
-BOARD_MAC="${BOARD_MAC:-9e:5c:1a:8a:bf:53}"
-TFTP_DIR="${TFTP_DIR:-/srv/tftp/pynq1}"
+# Optional TFTP netboot (disabled by default; configure via flags, env, or local.conf)
+TFTP_SERVER_IP="${TFTP_SERVER_IP:-}"
+BOARD_IP="${BOARD_IP:-}"
+BOARD_NETMASK="${BOARD_NETMASK:-255.255.255.0}"
+BOARD_GW="${BOARD_GW:-}"
+BOARD_MAC="${BOARD_MAC:-02:50:59:4e:51:01}"
+TFTP_PREFIX="${TFTP_PREFIX:-pynq1}"
+TFTP_DIR="${TFTP_DIR:-/srv/tftp/${TFTP_PREFIX}}"
 
 usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
 Options:
-  --pynq-image <path>   Use a local PYNQ-Z1 .zip or .img file instead of downloading
-  --skip-pynq-image     Skip downloading/extracting BOOT.BIN from PYNQ-Z1 image
-  -h, --help            Show this help message
+  --pynq-image <path>    Use a local PYNQ-Z1 .zip or .img file instead of downloading
+  --skip-pynq-image      Skip downloading/extracting BOOT.BIN from PYNQ-Z1 image
+  --tftp-server <ip>     Enable two-stage TFTP netboot in boot.scr (with SD fallback)
+  -h, --help             Show this help message
 
-Environment overrides:
-  ZEPHYR_VER            Zephyr git tag/branch (default: v4.5.0)
-  SDK_VER               Zephyr SDK version (default: 1.0.1)
-  PYNQ_ZIP_URL          PYNQ-Z1 image zip URL (default: v3.1.1 on download.amd.com)
+Environment overrides (can also be placed in git-ignored local.conf):
+  ZEPHYR_VER             Zephyr git tag/branch (default: v4.5.0)
+  SDK_VER                Zephyr SDK version (default: 1.0.1)
+  PYNQ_ZIP_URL           PYNQ-Z1 image zip URL (default: v3.1.1 on download.amd.com)
+  TFTP_SERVER_IP         TFTP server IP; if unset, boot.scr boots directly from SD
+  BOARD_IP               Optional static IP for U-Boot (if unset, U-Boot uses DHCP)
+  BOARD_NETMASK          Netmask when BOARD_IP is set (default: 255.255.255.0)
+  BOARD_GW               Optional gateway IP when BOARD_IP is set
+  BOARD_MAC              Locally administered MAC for U-Boot (default: 02:50:59:4e:51:01)
+  TFTP_PREFIX            Subdirectory under TFTP root (default: pynq1)
+  TFTP_DIR               Local staging dir (default: /srv/tftp/\$TFTP_PREFIX)
 EOF
 }
 
@@ -47,6 +62,11 @@ while [[ $# -gt 0 ]]; do
 	--skip-pynq-image)
 		SKIP_PYNQ_IMAGE=1
 		shift
+		;;
+	--tftp-server)
+		[[ $# -ge 2 ]] || { echo "ERROR: --tftp-server requires an IP address" >&2; exit 1; }
+		TFTP_SERVER_IP="$2"
+		shift 2
 		;;
 	-h | --help)
 		usage
@@ -247,48 +267,66 @@ PY
 	fi
 fi
 
-echo "=== [5/5] Generating boot.scr / netboot.scr and staging files ==="
-cat <<EOF >"$TOOLS_DIR/netboot.cmd"
+echo "=== [5/5] Generating boot scripts and staging files ==="
+cp "$BUILD_DIR/zephyr/zephyr.bin" "$SD_DIR/zephyr.bin"
+
+if [[ -n "$TFTP_SERVER_IP" ]]; then
+	cat <<EOF >"$TOOLS_DIR/netboot.cmd"
 echo "=== TFTP Netboot: Zephyr RTOS on PYNQ-Z1 ==="
-if tftpboot ${LOAD_ADDR} pynq1/zephyr.bin; then
+if tftpboot ${LOAD_ADDR} ${TFTP_PREFIX}/zephyr.bin; then
 	dcache off
 	icache off
 	go ${ENTRY_ADDR}
 fi
 EOF
 
-mkimage -A arm -O linux -T script -C none -a 0 -e 0 -n "Zephyr PYNQ-Z1 Netboot" \
-	-d "$TOOLS_DIR/netboot.cmd" "$SD_DIR/netboot.scr"
+	mkimage -A arm -O linux -T script -C none -a 0 -e 0 -n "Zephyr PYNQ-Z1 Netboot" \
+		-d "$TOOLS_DIR/netboot.cmd" "$SD_DIR/netboot.scr"
 
-cat <<EOF >"$TOOLS_DIR/boot.cmd"
-echo "=== PYNQ-Z1 Boot: trying TFTP (${TFTP_SERVER_IP}) ==="
-setenv ethaddr ${BOARD_MAC}
-setenv ipaddr ${BOARD_IP}
-setenv netmask ${BOARD_NETMASK}
-setenv gatewayip ${BOARD_GW}
-setenv serverip ${TFTP_SERVER_IP}
-setenv tftptimeout 1000
-setenv tftptimeoutcountmax 3
-if tftpboot 0x03100000 pynq1/netboot.scr; then
-	source 0x03100000
-fi
-echo "=== TFTP unavailable, falling back to SD card ==="
+	{
+		echo "echo \"=== PYNQ-Z1 Boot: trying TFTP (${TFTP_SERVER_IP}) ===\""
+		echo "setenv ethaddr ${BOARD_MAC}"
+		if [[ -n "$BOARD_IP" ]]; then
+			echo "setenv ipaddr ${BOARD_IP}"
+			echo "setenv netmask ${BOARD_NETMASK}"
+			if [[ -n "$BOARD_GW" ]]; then
+				echo "setenv gatewayip ${BOARD_GW}"
+			fi
+		else
+			echo "setenv autoload no"
+			echo "dhcp"
+		fi
+		echo "setenv serverip ${TFTP_SERVER_IP}"
+		echo "setenv tftptimeout 1000"
+		echo "setenv tftptimeoutcountmax 3"
+		echo "if tftpboot 0x03100000 ${TFTP_PREFIX}/netboot.scr; then"
+		echo "	source 0x03100000"
+		echo "fi"
+		echo "echo \"=== TFTP unavailable, falling back to SD card ===\""
+		echo "fatload mmc 0:1 ${LOAD_ADDR} zephyr.bin"
+		echo "dcache off"
+		echo "icache off"
+		echo "go ${ENTRY_ADDR}"
+	} >"$TOOLS_DIR/boot.cmd"
+
+	if [[ -d "$TFTP_DIR" && -w "$TFTP_DIR" ]]; then
+		cp "$SD_DIR/netboot.scr" "$SD_DIR/zephyr.bin" "$TFTP_DIR/"
+		chmod 644 "$TFTP_DIR/netboot.scr" "$TFTP_DIR/zephyr.bin"
+		echo ">>> Staged TFTP netboot files in: $TFTP_DIR/"
+	fi
+else
+	rm -f "$SD_DIR/netboot.scr"
+	cat <<EOF >"$TOOLS_DIR/boot.cmd"
+echo "=== Starting Zephyr RTOS on PYNQ-Z1 ==="
 fatload mmc 0:1 ${LOAD_ADDR} zephyr.bin
 dcache off
 icache off
 go ${ENTRY_ADDR}
 EOF
+fi
 
 mkimage -A arm -O linux -T script -C none -a 0 -e 0 -n "Zephyr PYNQ-Z1" \
 	-d "$TOOLS_DIR/boot.cmd" "$SD_DIR/boot.scr"
-
-cp "$BUILD_DIR/zephyr/zephyr.bin" "$SD_DIR/zephyr.bin"
-
-if [[ -d "$TFTP_DIR" && -w "$TFTP_DIR" ]]; then
-	cp "$SD_DIR/netboot.scr" "$SD_DIR/zephyr.bin" "$TFTP_DIR/"
-	chmod 644 "$TFTP_DIR/netboot.scr" "$TFTP_DIR/zephyr.bin"
-	echo ">>> Staged TFTP netboot files in: $TFTP_DIR/"
-fi
 
 echo "================================================================="
 echo "Done. Copy these files to the root of a FAT32 microSD card:"
