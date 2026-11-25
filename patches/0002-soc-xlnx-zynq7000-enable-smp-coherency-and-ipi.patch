@@ -1,0 +1,58 @@
+diff --git a/arch/arm/core/cortex_a_r/Kconfig b/arch/arm/core/cortex_a_r/Kconfig
+index e8cdde30540..020e72945d1 100644
+--- a/arch/arm/core/cortex_a_r/Kconfig
++++ b/arch/arm/core/cortex_a_r/Kconfig
+@@ -65,6 +65,8 @@ config ARMV7_A
+ 	select ARM_A_PROFILE_AARCH32
+ 	select ATOMIC_OPERATIONS_BUILTIN
+ 	select ISA_ARM
++	select SCHED_IPI_SUPPORTED if SMP
++	select ARCH_HAS_DIRECTED_IPIS
+ 
+ config AARCH32_ARMV8_A
+ 	bool
+diff --git a/soc/xlnx/zynq7000/common/soc.c b/soc/xlnx/zynq7000/common/soc.c
+index b60b8377e12..f40c70e72f4 100644
+--- a/soc/xlnx/zynq7000/common/soc.c
++++ b/soc/xlnx/zynq7000/common/soc.c
+@@ -16,6 +16,13 @@
+ /* System Level Control Registers (SLCR) */
+ #define SLCR_UNLOCK     0x0008
+ #define SLCR_UNLOCK_KEY 0xdf0d
++
++/* Cortex-A9 MPCore Snoop Control Unit (SCU) */
++#define SCU_BASE        0xF8F00000U
++#define SCU_CTRL        (SCU_BASE + 0x00U)
++#define SCU_INV_ALL     (SCU_BASE + 0x0CU)
++#define ACTLR_SMP_BIT   BIT(6)
++#define ACTLR_FW_BIT    BIT(0)
+ #define AXI_GPIO_MMU_ENTRY(id)\
+ 	MMU_REGION_FLAT_ENTRY("axigpio",\
+ 			      DT_REG_ADDR(id),\
+@@ -84,6 +91,26 @@ void soc_reset_hook(void)
+ 	sctlr &= ~SCTLR_A_Msk;
+ 	__set_SCTLR(sctlr);
+ 
++#if defined(CONFIG_SMP)
++	/*
++	 * Invalidate L1 caches and branch predictor before joining coherency,
++	 * enable the Cortex-A9 SCU on the primary core, and set ACTLR.SMP|FW
++	 * on every core before MMU/D-cache enable in z_arm_mmu_init().
++	 */
++	L1C_InvalidateICacheAll();
++	L1C_InvalidateBTAC();
++	L1C_InvalidateDCacheAll();
++
++	if ((__get_MPIDR() & 0x3U) == 0U) {
++		sys_write32(0x0000FFFFU, SCU_INV_ALL);
++		sys_write32(sys_read32(SCU_CTRL) | BIT(0), SCU_CTRL);
++	}
++
++	__set_ACTLR(__get_ACTLR() | ACTLR_SMP_BIT | ACTLR_FW_BIT);
++	__DSB();
++	__ISB();
++#endif
++
+ #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(slcr))
+ 	mm_reg_t addr = DT_REG_ADDR(DT_NODELABEL(slcr));
+ 

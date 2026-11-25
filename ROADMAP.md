@@ -32,7 +32,7 @@ This roadmap tracks the bring-up and R&D milestones for running Zephyr RTOS (`v4
   - [x] Inspect PYNQ `v3.1` Linux FIT (`image.ub`): stock `fdt-0` has no `remoteproc` or `reserved-memory` nodes, so AMP will require a custom FDT overlay (`devicetree/openamp.dtbo` is already hooked in stock `boot.scr`).
   - [ ] Reserve dedicated DDR via `reserved-memory` and relocate Zephyr's vector table away from `0x00000000`.
   - [ ] Implement GIC SGI-based IPM/mailbox signaling for Zynq-7000 (`ipm_xlnx_ipi` targets ZynqMP) and run `openamp_rsc_table` (`/dev/ttyRPMSG0`).
-- [ ] *(Optional R&D)* Explore SMP on dual Cortex-A9 (`CONFIG_MP_MAX_NUM_CPUS=2`, SCU coherency, and secondary core bring-up).
+- [x] **2-core SMP on Cortex-A9 (`CONFIG_SMP=y`, `CONFIG_MP_MAX_NUM_CPUS=2`):** verified on hardware (`smp info` scheduled on CPU1 `MPIDR=0x80000001`; `smp test` ran pinned workers concurrently on CPU0 and CPU1 with parallel wall time matching max core time). Reproducible via `patches/0002-soc-xlnx-zynq7000-enable-smp-coherency-and-ipi.patch` + `src/zynq7000_smp.c` (`pm_cpu_on`) + `CONFIG_FPU=n` workaround for `CONFIG_USE_SWITCH` + `CONFIG_FPU_SHARING` mismatch in `thread.c`/`exc.S`.
 
 ## Phase 5: FPGA (PL) & Multi-Board Lab
 
