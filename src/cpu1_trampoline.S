@@ -19,7 +19,13 @@ cpu1_entry:
 	/* Read MPIDR (CP15 c0, 0, c0, 5) to verify Core 1 identity */
 	mrc p15, 0, r1, c0, c0, 5
 
-	/* Point r0 to shared __nocache status block */
+	/* Point r0 to shared __nocache status block:
+	 *  #0  magic
+	 *  #4  mpidr
+	 *  #8  heartbeat
+	 *  #12 run_cmd  (1 = run, 0 = park in WFE)
+	 *  #16 state    (1 = running, 0 = stopped/parked)
+	 */
 	ldr r0, =cpu1_shm
 
 	/* Store magic "CPU1" (0x43505531) and MPIDR */
@@ -31,6 +37,14 @@ cpu1_entry:
 	dsb sy
 
 1:
+	/* Check run_cmd */
+	ldr r2, [r0, #12]
+	cmp r2, #0
+	beq 3f
+
+	/* Mark running and increment heartbeat */
+	mov r2, #1
+	str r2, [r0, #16]
 	add r3, r3, #1
 	str r3, [r0, #8]
 	dsb sy
@@ -40,6 +54,14 @@ cpu1_entry:
 2:
 	subs r4, r4, #1
 	bne 2b
+	b 1b
+
+3:
+	/* Mark stopped and park in low-power WFE until CPU0 sends SEV */
+	mov r2, #0
+	str r2, [r0, #16]
+	dsb sy
+	wfe
 	b 1b
 
 	.size cpu1_entry, . - cpu1_entry
