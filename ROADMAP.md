@@ -13,8 +13,8 @@ This roadmap tracks the bring-up and R&D milestones for running Zephyr RTOS (`v4
 
 - [x] Enable 1G Ethernet (`gem0`, `phyaddr 0`, `rgmii-id`) with a fixed locally administered MAC (`9e:5c:1a:8a:bf:53`), DHCPv4 client, and `net` shell.
 - [x] Verify 1000 Mb full-duplex link, DHCPv4 lease acquisition, and ICMP ping (~1.1 ms) on hardware.
-- [ ] Flash and verify the rebuilt image with `CONFIG_NET_HOSTNAME="pynq1"` on microSD.
-- [ ] Add network throughput benchmarking (`zperf`) and lightweight services (mDNS `pynq1.local`, HTTP/CoAP/MQTT).
+- [x] Add network throughput benchmarking (`zperf`), `NET_STATISTICS`, and mDNS responder (`pynq1.local`) to `prj.conf`.
+- [ ] Flash and verify the native `pynq_z1` build (`pynq1.local` + `zperf`) on hardware.
 
 ## Phase 3: Native `pynq_z1` Board Port (In Progress)
 
@@ -26,7 +26,7 @@ This roadmap tracks the bring-up and R&D milestones for running Zephyr RTOS (`v4
 
 - [ ] Run a minimal CPU1 wake-up test from Zephyr (`0xFFFFFFF0` + `sev` on Zynq-7000).
 - [ ] **AMP / OpenAMP (Linux on CPU0 + real-time Zephyr on CPU1):**
-  - [ ] Inspect PYNQ Linux (`image.ub`) for `zynq_remoteproc` and `rpmsg` support.
+  - [x] Inspect PYNQ `v3.1` Linux FIT (`image.ub`): stock `fdt-0` has no `remoteproc` or `reserved-memory` nodes, so AMP will require a custom FDT overlay (`devicetree/openamp.dtbo` is already hooked in stock `boot.scr`).
   - [ ] Reserve dedicated DDR via `reserved-memory` and relocate Zephyr's vector table away from `0x00000000`.
   - [ ] Implement GIC SGI-based IPM/mailbox signaling for Zynq-7000 (`ipm_xlnx_ipi` targets ZynqMP) and run `openamp_rsc_table` (`/dev/ttyRPMSG0`).
 - [ ] *(Optional R&D)* Explore SMP on dual Cortex-A9 (`CONFIG_MP_MAX_NUM_CPUS=2`, SCU coherency, and secondary core bring-up).
