@@ -120,7 +120,7 @@ if [[ ! -d "$ZEPHYR_WS/.west" ]]; then
 fi
 
 pushd "$ZEPHYR_WS" >/dev/null
-west config manifest.project-filter -- "-.*,+cmsis,+picolibc"
+west config manifest.project-filter -- "-.*,+cmsis,+picolibc,+libmetal,+open-amp"
 west update
 pip install -q -r "$ZEPHYR_WS/zephyr/scripts/requirements-base.txt"
 popd >/dev/null

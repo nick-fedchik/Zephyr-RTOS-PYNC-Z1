@@ -23,15 +23,15 @@ This roadmap tracks the bring-up and R&D milestones for running Zephyr RTOS (`v4
 - [x] Verify the native `pynq_z1` build on hardware (UART0 + 1G Ethernet/DHCPv4 + `zperf`).
 - [ ] Verify additional PS peripherals (GPIO, SDHC0, QSPI, I2C, USB) against the PYNQ-Z1 hardware preset.
 
-## Phase 4: Dual-Core & Heterogeneous Computing (AMP / SMP)
+## Phase 4: Dual-Core & Heterogeneous Computing (Completed)
 
 - [x] Set up two-stage TFTP netboot (`boot.scr` -> `pynq1/netboot.scr` -> `pynq1/zephyr.bin`) with SD fallback for rapid iteration via `SRST` (`960 KiB/s` verified on hardware).
 - [x] Run a minimal CPU1 wake-up test from Zephyr (`0xFFFFFFF0` + `sev` on Zynq-7000): verified on hardware (`magic=0x43505531`, `mpidr=0x80000001`, `core=1`, `CPU1 is ALIVE`, plus cooperative `cpu1 stop` WFE park and resume).
-- [x] Verify bi-directional CPU0 ↔ CPU1 IPC via `__nocache` shared memory and GICv1 SGI #7 (`cpu1 ping`: **7 µs** RTT from WFE park, **16 µs** while running), fixing an upstream Zephyr `v4.5.0` GICv1/v2 `GICC_IAR` CPUID-masking bug in `isr_wrapper.S` (`patches/0001-arch-arm-cortex_a_r-mask-gic-v1-v2-intid-in-isr-wrapper.patch`).
+- [x] Verify bi-directional CPU0 ↔ CPU1 IPC via `__nocache` shared memory and GICv1 SGI #7 (`cpu1 ping`: **7 µs** RTT from WFE park, **16 µs** while running), fixing an upstream Zephyr `v4.5.0` GICv1/v2 `GICC_IAR` CPUID-masking bug in `isr_wrapper.S` (`patches/0001-arch-arm-cortex_a_r-mask-gic-v1-v2-intid-in-isr-wrapper.patch`, documented in `docs/zephyr-gic-v1-v2-sgi-bug.md`).
 - [x] **AMP / OpenAMP (Linux on CPU0 + real-time Zephyr on CPU1):**
   - [x] Inspect PYNQ `v3.1` Linux FIT (`image.ub`, `Linux 6.6.10-xilinx-v2024.1`): kernel already ships with `CONFIG_REMOTEPROC=y`, `CONFIG_ZYNQ_REMOTEPROC=m`, `CONFIG_RPMSG_VIRTIO=m`, `CONFIG_RPMSG_CHAR=m`, and `CONFIG_RPMSG_CTRL=m`! Stock `fdt-0` lacks `remoteproc`/`reserved-memory`, so AMP only needs a DT overlay (`openamp.dtbo`) — no Linux kernel rebuild required.
-  - [x] Reserve dedicated DDR via `reserved-memory` (`0x1e000000`, 16 MiB), relocate Zephyr's vector table via `VBAR` (`0x1e000000`) with MMU mapping (`vbar_vectors`), enable `CONFIG_GIC_SAFE_CONFIG=y` + `ACTLR.SMP|FW`, and verify live **Linux 6.6.10 (CPU0) + Zephyr v4.5.0 (CPU1)** coexistence via `zynq_remoteproc` and `/sys/kernel/debug/remoteproc/remoteproc0/trace0`!
-  - [ ] Add RPMsg channel (`open-amp` + `libmetal` over GIC SGI 14/15) for bidirectional messaging between Linux and Zephyr CPU1.
+  - [x] Reserve dedicated DDR via `reserved-memory` (`0x1e000000`, 16 MiB), relocate Zephyr's vector table via `VBAR` (`0x1e000000`) with MMU mapping (`vbar_vectors`), enable `CONFIG_GIC_SAFE_CONFIG=y` + `ACTLR.SMP|FW`, and verify live **Linux 6.6.10 (CPU0) + Zephyr v4.5.0 (CPU1)** coexistence via `zynq_remoteproc` and `/sys/kernel/debug/remoteproc/remoteproc0/trace0`.
+  - [x] Add bidirectional RPMsg channel (`open-amp` + `libmetal` over GICv1 SGI 14/15, endpoint `"rpmsg-raw"` -> Linux `/dev/rpmsg0`): verified live echo round-trip from Python on PYNQ Linux to Zephyr CPU1 at **137–179 µs** RTT!
 - [x] **2-core SMP on Cortex-A9 (`CONFIG_SMP=y`, `CONFIG_MP_MAX_NUM_CPUS=2`):** verified on hardware (`smp info` scheduled on CPU1 `MPIDR=0x80000001`; `smp test` ran pinned workers concurrently on CPU0 and CPU1 with parallel wall time matching max core time). Reproducible via `patches/0002-soc-xlnx-zynq7000-enable-smp-coherency-and-ipi.patch` + `src/zynq7000_smp.c` (`pm_cpu_on`) + `CONFIG_FPU=n` workaround for `CONFIG_USE_SWITCH` + `CONFIG_FPU_SHARING` mismatch in `thread.c`/`exc.S`.
 
 ## Phase 5: FPGA (PL) & Multi-Board Lab
