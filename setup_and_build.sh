@@ -14,6 +14,13 @@ PYNQ_ZIP_URL="${PYNQ_ZIP_URL:-https://download.amd.com/opendownload/pynq/pynq_z1
 PYNQ_IMAGE_PATH="${PYNQ_IMAGE_PATH:-}"
 SKIP_PYNQ_IMAGE=0
 
+TFTP_SERVER_IP="${TFTP_SERVER_IP:-192.168.68.57}"
+BOARD_IP="${BOARD_IP:-192.168.68.81}"
+BOARD_NETMASK="${BOARD_NETMASK:-255.255.252.0}"
+BOARD_GW="${BOARD_GW:-192.168.68.1}"
+BOARD_MAC="${BOARD_MAC:-9e:5c:1a:8a:bf:53}"
+TFTP_DIR="${TFTP_DIR:-/srv/tftp/pynq1}"
+
 usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
@@ -229,9 +236,32 @@ PY
 	fi
 fi
 
-echo "=== [5/5] Generating boot.scr and staging sd_card_files ==="
+echo "=== [5/5] Generating boot.scr / netboot.scr and staging files ==="
+cat <<EOF >"$TOOLS_DIR/netboot.cmd"
+echo "=== TFTP Netboot: Zephyr RTOS on PYNQ-Z1 ==="
+if tftpboot ${LOAD_ADDR} pynq1/zephyr.bin; then
+	dcache off
+	icache off
+	go ${ENTRY_ADDR}
+fi
+EOF
+
+mkimage -A arm -O linux -T script -C none -a 0 -e 0 -n "Zephyr PYNQ-Z1 Netboot" \
+	-d "$TOOLS_DIR/netboot.cmd" "$SD_DIR/netboot.scr"
+
 cat <<EOF >"$TOOLS_DIR/boot.cmd"
-echo "=== Starting Zephyr RTOS on PYNQ-Z1 ==="
+echo "=== PYNQ-Z1 Boot: trying TFTP (${TFTP_SERVER_IP}) ==="
+setenv ethaddr ${BOARD_MAC}
+setenv ipaddr ${BOARD_IP}
+setenv netmask ${BOARD_NETMASK}
+setenv gatewayip ${BOARD_GW}
+setenv serverip ${TFTP_SERVER_IP}
+setenv tftptimeout 1000
+setenv tftptimeoutcountmax 3
+if tftpboot 0x03100000 pynq1/netboot.scr; then
+	source 0x03100000
+fi
+echo "=== TFTP unavailable, falling back to SD card ==="
 fatload mmc 0:1 ${LOAD_ADDR} zephyr.bin
 dcache off
 icache off
@@ -242,6 +272,12 @@ mkimage -A arm -O linux -T script -C none -a 0 -e 0 -n "Zephyr PYNQ-Z1" \
 	-d "$TOOLS_DIR/boot.cmd" "$SD_DIR/boot.scr"
 
 cp "$BUILD_DIR/zephyr/zephyr.bin" "$SD_DIR/zephyr.bin"
+
+if [[ -d "$TFTP_DIR" && -w "$TFTP_DIR" ]]; then
+	cp "$SD_DIR/netboot.scr" "$SD_DIR/zephyr.bin" "$TFTP_DIR/"
+	chmod 644 "$TFTP_DIR/netboot.scr" "$TFTP_DIR/zephyr.bin"
+	echo ">>> Staged TFTP netboot files in: $TFTP_DIR/"
+fi
 
 echo "================================================================="
 echo "Done. Copy these files to the root of a FAT32 microSD card:"
