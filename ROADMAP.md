@@ -25,7 +25,8 @@ This roadmap tracks the bring-up and R&D milestones for running Zephyr RTOS (`v4
 
 ## Phase 4: Dual-Core & Heterogeneous Computing (AMP / SMP)
 
-- [ ] Run a minimal CPU1 wake-up test from Zephyr (`0xFFFFFFF0` + `sev` on Zynq-7000).
+- [x] Set up two-stage TFTP netboot (`boot.scr` -> `pynq1/netboot.scr` -> `pynq1/zephyr.bin`) with SD fallback for rapid iteration via `SRST` (`960 KiB/s` verified on hardware).
+- [x] Run a minimal CPU1 wake-up test from Zephyr (`0xFFFFFFF0` + `sev` on Zynq-7000): verified on hardware (`magic=0x43505531`, `mpidr=0x80000001`, `core=1`, `CPU1 is ALIVE`).
 - [ ] **AMP / OpenAMP (Linux on CPU0 + real-time Zephyr on CPU1):**
   - [x] Inspect PYNQ `v3.1` Linux FIT (`image.ub`): stock `fdt-0` has no `remoteproc` or `reserved-memory` nodes, so AMP will require a custom FDT overlay (`devicetree/openamp.dtbo` is already hooked in stock `boot.scr`).
   - [ ] Reserve dedicated DDR via `reserved-memory` and relocate Zephyr's vector table away from `0x00000000`.
