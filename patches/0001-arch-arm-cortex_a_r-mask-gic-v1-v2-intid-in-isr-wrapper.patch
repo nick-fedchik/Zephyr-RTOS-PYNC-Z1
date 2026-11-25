@@ -1,0 +1,20 @@
+diff --git a/arch/arm/core/cortex_a_r/isr_wrapper.S b/arch/arm/core/cortex_a_r/isr_wrapper.S
+index 78fe3060d59..d94bdd22fd0 100644
+--- a/arch/arm/core/cortex_a_r/isr_wrapper.S
++++ b/arch/arm/core/cortex_a_r/isr_wrapper.S
+@@ -183,6 +183,15 @@ _idle_state_cleared:
+ #endif /* !CONFIG_ARM_CUSTOM_INTERRUPT_CONTROLLER */
+ 	push {r0, r1}
+ 
++#if defined(CONFIG_GIC_V1) || defined(CONFIG_GIC_V2)
++	/*
++	 * GICC_IAR carries CPUID in bits [12:10] for SGIs from another core.
++	 * Keep the full IAR on the stack for arm_gic_eoi(), but mask r0 to
++	 * the 10-bit INTID before bounds-checking and _sw_isr_table lookup.
++	 */
++	ubfx r0, r0, #0, #10
++#endif
++
+ #ifdef CONFIG_ARM_TRACK_ACTIVE_IRQ
+ 	/*
+ 	 * Publish the acknowledged INTID for arch_irq_get_active(). The value

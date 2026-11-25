@@ -125,6 +125,17 @@ west update
 pip install -q -r "$ZEPHYR_WS/zephyr/scripts/requirements-base.txt"
 popd >/dev/null
 
+if [[ -d "$WORK_DIR/patches" ]]; then
+	for patch_file in "$WORK_DIR"/patches/*.patch; do
+		[[ -f "$patch_file" ]] || continue
+		if git -C "$ZEPHYR_WS/zephyr" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
+			continue
+		fi
+		echo ">>> Applying Zephyr patch: $(basename "$patch_file")"
+		git -C "$ZEPHYR_WS/zephyr" apply "$patch_file"
+	done
+fi
+
 echo "=== [2/5] Installing Zephyr SDK ($SDK_VER, arm-zephyr-eabi) into .tools ==="
 SDK_DIR="$TOOLS_DIR/zephyr-sdk-${SDK_VER}"
 if [[ ! -d "$SDK_DIR/gnu/arm-zephyr-eabi" && ! -d "$SDK_DIR/arm-zephyr-eabi" ]]; then

@@ -26,7 +26,8 @@ This roadmap tracks the bring-up and R&D milestones for running Zephyr RTOS (`v4
 ## Phase 4: Dual-Core & Heterogeneous Computing (AMP / SMP)
 
 - [x] Set up two-stage TFTP netboot (`boot.scr` -> `pynq1/netboot.scr` -> `pynq1/zephyr.bin`) with SD fallback for rapid iteration via `SRST` (`960 KiB/s` verified on hardware).
-- [x] Run a minimal CPU1 wake-up test from Zephyr (`0xFFFFFFF0` + `sev` on Zynq-7000): verified on hardware (`magic=0x43505531`, `mpidr=0x80000001`, `core=1`, `CPU1 is ALIVE`).
+- [x] Run a minimal CPU1 wake-up test from Zephyr (`0xFFFFFFF0` + `sev` on Zynq-7000): verified on hardware (`magic=0x43505531`, `mpidr=0x80000001`, `core=1`, `CPU1 is ALIVE`, plus cooperative `cpu1 stop` WFE park and resume).
+- [x] Verify bi-directional CPU0 ↔ CPU1 IPC via `__nocache` shared memory and GICv1 SGI #7 (`cpu1 ping`: **7 µs** RTT from WFE park, **16 µs** while running), fixing an upstream Zephyr `v4.5.0` GICv1/v2 `GICC_IAR` CPUID-masking bug in `isr_wrapper.S` (`patches/0001-arch-arm-cortex_a_r-mask-gic-v1-v2-intid-in-isr-wrapper.patch`).
 - [ ] **AMP / OpenAMP (Linux on CPU0 + real-time Zephyr on CPU1):**
   - [x] Inspect PYNQ `v3.1` Linux FIT (`image.ub`): stock `fdt-0` has no `remoteproc` or `reserved-memory` nodes, so AMP will require a custom FDT overlay (`devicetree/openamp.dtbo` is already hooked in stock `boot.scr`).
   - [ ] Reserve dedicated DDR via `reserved-memory` and relocate Zephyr's vector table away from `0x00000000`.
