@@ -1,4 +1,4 @@
-# ZephyrOS-PYNC-Z1
+# Zephyr-RTOS-PYNC-Z1
 
 Zephyr RTOS (`v4.5.0`) on a **Digilent PYNQ-Z1** (Xilinx Zynq-7000 `XC7Z020`,
 dual Cortex-A9 + Artix-7 FPGA) without installing AMD Vivado or Vitis.
@@ -124,8 +124,8 @@ From an initialized Zephyr `v4.5.0` workspace with Zephyr SDK `1.0.1` and
 `patches/` applied:
 
 ```sh
-west build -b pynq_z1 /path/to/ZephyrOS-PYNC-Z1 -d /path/to/build -- \
-	-DBOARD_ROOT=/path/to/ZephyrOS-PYNC-Z1
+west build -b pynq_z1 /path/to/Zephyr-RTOS-PYNC-Z1 -d /path/to/build -- \
+	-DBOARD_ROOT=/path/to/Zephyr-RTOS-PYNC-Z1
 ```
 
 ## License
