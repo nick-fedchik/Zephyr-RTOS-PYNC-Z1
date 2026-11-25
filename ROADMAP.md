@@ -16,9 +16,10 @@ This roadmap tracks the bring-up and R&D milestones for running Zephyr RTOS (`v4
 - [ ] Flash and verify the rebuilt image with `CONFIG_NET_HOSTNAME="pynq1"` on microSD.
 - [ ] Add network throughput benchmarking (`zperf`) and lightweight services (mDNS `pynq1.local`, HTTP/CoAP/MQTT).
 
-## Phase 3: Native `pynq_z1` Board Port
+## Phase 3: Native `pynq_z1` Board Port (In Progress)
 
-- [ ] Replace the `zedboard` + overlay workaround with an out-of-tree HWMv2 board definition under `boards/digilent/pynq_z1/` (`board.yml`, `Kconfig.pynq_z1`, `Kconfig.defconfig`, `pynq_z1_defconfig`, `pynq_z1.dts`, `pynq_z1-pinctrl.dtsi`) to build directly via `west build -b pynq_z1`.
+- [x] Replace the `zedboard` + overlay workaround with an out-of-tree HWMv2 board definition under `boards/digilent/pynq_z1/` (`board.yml`, `Kconfig.pynq_z1`, `Kconfig.defconfig`, `pynq_z1_defconfig`, `pynq_z1.dts`, `pynq_z1-pinctrl.dtsi`) to build directly via `west build -b pynq_z1`.
+- [ ] Verify the native `pynq_z1` build on hardware (UART0 + 1G Ethernet/DHCPv4).
 - [ ] Verify additional PS peripherals (GPIO, SDHC0, QSPI, I2C, USB) against the PYNQ-Z1 hardware preset.
 
 ## Phase 4: Dual-Core & Heterogeneous Computing (AMP / SMP)

@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+
+identifier: pynq_z1
+name: Digilent PYNQ-Z1
+type: mcu
+arch: arm
+toolchain:
+  - zephyr
+  - gnuarmemb
+ram: 524288
+supported:
+  - gpio
+  - netif:eth
+vendor: digilent

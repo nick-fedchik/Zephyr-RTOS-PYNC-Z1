@@ -1,22 +1,21 @@
 # ZephyrOS-PYNC-Z1
 
 Zephyr RTOS (`v4.5.0`) bring-up on a Digilent PYNQ-Z1 (Xilinx Zynq-7000 `XC7Z020`)
-without installing Vivado or Vitis. It builds against upstream Zephyr's `zedboard`
-target with `boards/zedboard.overlay` adapting UART0 (`MIO14`/`MIO15`), the
+without installing Vivado or Vitis. It provides a native out-of-tree HWMv2 board
+definition (`boards/digilent/pynq_z1/`) with UART0 (`MIO14`/`MIO15`), the
 325 MHz ARM global timer, and 1G Ethernet (`gem0`) with a fixed locally
 administered MAC address and DHCPv4 (`hostname = "pynq1"`).
 
-**This is not a standalone upstream PYNQ-Z1 board port and does not synthesize an
-FPGA bitstream or `BOOT.BIN`.** Instead, it reuses the verified `BOOT.BIN`
-(FSBL + U-Boot) from the official PYNQ-Z1 SD image for DDR3 and MIO
-initialization.
+**This does not synthesize an FPGA bitstream or `BOOT.BIN`.** Instead, it reuses
+the verified `BOOT.BIN` (FSBL + U-Boot) from the official PYNQ-Z1 SD image for
+DDR3 and MIO initialization.
 
 ## Automated local setup and build
 
 `./setup_and_build.sh` sets up a self-contained Zephyr workspace (`.venv/`,
 `.tools/`, `zephyr-ws/`), installs the minimal Zephyr SDK `1.0.1`
-(`arm-zephyr-eabi`), builds `zephyr.bin` for `zedboard` with
-`boards/zedboard.overlay`, extracts `BOOT.BIN` from the official PYNQ-Z1 image,
+(`arm-zephyr-eabi`), builds `zephyr.bin` for the native `pynq_z1` board
+(`-DBOARD_ROOT=...`), extracts `BOOT.BIN` from the official PYNQ-Z1 image,
 and stages `sd_card_files/` with `boot.scr` (using `LOAD_ADDR` for `fatload`
 and `ENTRY_ADDR` for `go`):
 
@@ -34,15 +33,15 @@ following the [Zephyr getting-started guide](https://docs.zephyrproject.org/late
 From that workspace, build this application:
 
 ```sh
-west build -b zedboard /path/to/ZephyrOS-PYNC-Z1 -d /path/to/build
+west build -b pynq_z1 /path/to/ZephyrOS-PYNC-Z1 -d /path/to/build -- \
+	-DBOARD_ROOT=/path/to/ZephyrOS-PYNC-Z1
 ```
 
-The raw image is `/path/to/build/zephyr/zephyr.bin`. The overlay switches the
-console from ZedBoard's UART1 to UART0 (`MIO14`/`MIO15`, `LVCMOS33`, 100 MHz
-clock), configures `pinctrl_uart0_default` (required by `uart_xlnx_ps` when
-`CONFIG_PINCTRL=y`), sets `&arch_timer` to 325 MHz, and enables `&gem0` with
-`local-mac-address = [9e 5c 1a 8a bf 53]`. The 1 MiB DDR offset comes from the
-ZedBoard baseline (`0x00100000`).
+The raw image is `/path/to/build/zephyr/zephyr.bin`. The board definition
+(`boards/digilent/pynq_z1/`) configures UART0 (`MIO14`/`MIO15`, `LVCMOS33`,
+100 MHz clock) via `pinctrl_uart0_default`, sets `&arch_timer` to 325 MHz,
+reserves the low 1 MiB of DDR3 (`sram0` at `0x00100000`), and enables `&gem0`
+with `local-mac-address = [9e 5c 1a 8a bf 53]`.
 
 ## Reuse a PYNQ boot image
 

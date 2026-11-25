@@ -136,9 +136,9 @@ export ZEPHYR_SDK_INSTALL_DIR="$SDK_DIR"
 # shellcheck disable=SC1091
 source "$ZEPHYR_WS/zephyr/zephyr-env.sh"
 
-echo "=== [3/5] Building Zephyr (zedboard + boards/zedboard.overlay) ==="
-west build -p always -b zedboard "$WORK_DIR" -d "$BUILD_DIR" -- \
-	-DDTC_OVERLAY_FILE="$WORK_DIR/boards/zedboard.overlay"
+echo "=== [3/5] Building Zephyr (native board: pynq_z1) ==="
+west build -p always -b pynq_z1 "$WORK_DIR" -d "$BUILD_DIR" -- \
+	-DBOARD_ROOT="$WORK_DIR"
 
 READELF="$SDK_DIR/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-readelf"
 if [[ ! -x "$READELF" ]]; then
