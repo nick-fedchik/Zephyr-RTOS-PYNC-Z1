@@ -1,0 +1,64 @@
+#include <zephyr/dt-bindings/pinctrl/pinctrl-zynq.h>
+
+/ {
+	model = "Digilent PYNQ-Z1 (experimental ZedBoard baseline)";
+
+	chosen {
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
+	};
+
+	leds {
+		status = "disabled";
+	};
+
+	gpio_keys {
+		status = "disabled";
+	};
+};
+
+&pinctrl0 {
+	pinctrl_uart0_default: uart0-default {
+		mux {
+			groups = "uart0_1_grp";
+			function = "uart0";
+		};
+
+		conf {
+			groups = "uart0_1_grp";
+			slew-rate = <IO_SPEED_SLOW>;
+			power-source = <IO_STANDARD_LVCMOS33>;
+		};
+
+		conf-rx {
+			pins = "MIO14";
+			bias-high-impedance;
+		};
+
+		conf-tx {
+			pins = "MIO15";
+			bias-disable;
+		};
+	};
+};
+
+&arch_timer {
+	clock-frequency = <325000000>;
+};
+
+&uart0 {
+	current-speed = <115200>;
+	clock-frequency = <100000000>;
+	pinctrl-0 = <&pinctrl_uart0_default>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+&uart1 {
+	status = "disabled";
+};
+
+&gem0 {
+	status = "okay";
+	local-mac-address = [9e 5c 1a 8a bf 53];
+};

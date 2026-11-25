@@ -1,0 +1,6 @@
+.venv/
+.tools/
+zephyr-ws/
+build/
+sd_card_files/
+sd_backup/
