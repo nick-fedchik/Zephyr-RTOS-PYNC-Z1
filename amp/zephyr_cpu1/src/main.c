@@ -21,6 +21,9 @@
 #define RSC_TRACE 2U
 #define AMP_TRACE_BUF_SIZE 2048U
 
+static char amp_trace_buf[AMP_TRACE_BUF_SIZE] __nocache;
+static size_t amp_trace_pos;
+
 /*
  * Override the weak Zynq/ARMv7-A relocate_vector_table() so CPU1 keeps its
  * exception vectors inside 0x1e000000 via VBAR and never overwrites Linux's
@@ -30,9 +33,20 @@ void relocate_vector_table(void)
 {
 	uint32_t sctlr = __get_SCTLR();
 
+	/*
+	 * Invalidate CPU1 L1 caches and branch predictor before Zephyr enables
+	 * MMU/D-cache (Linux hot-unplugged CPU1 via zynq_cpun_start).
+	 */
+	L1C_InvalidateICacheAll();
+	L1C_InvalidateBTAC();
+	L1C_InvalidateDCacheAll();
+	/* Join Cortex-A9 SCU coherency (Linux already enabled SCU on CPU0) */
+	__set_ACTLR(__get_ACTLR() | BIT(6) | BIT(0));
+
 	sctlr &= ~SCTLR_V_Msk; /* Clear HIVECS so VBAR is active */
 	__set_SCTLR(sctlr);
 	__set_VBAR((uint32_t)_vector_start);
+	barrier_dsync_fence_full();
 	barrier_isync_fence_full();
 }
 
@@ -51,9 +65,6 @@ struct amp_resource_table {
 	uint32_t offset[1];
 	struct fw_rsc_trace trace;
 } __packed;
-
-static char amp_trace_buf[AMP_TRACE_BUF_SIZE] __nocache;
-static size_t amp_trace_pos;
 
 __attribute__((section(".resource_table"), used))
 const struct amp_resource_table rproc_resource_table = {
@@ -95,9 +106,10 @@ int main(void)
 	uint32_t vbar = __get_VBAR();
 	uint32_t tick = 0U;
 
-	memset(amp_trace_buf, 0, sizeof(amp_trace_buf));
+	amp_trace_pos = 0U;
+	trace_append("*** Zephyr AMP on PYNQ-Z1 CPU1 booted ***\n");
 	snprintf(line, sizeof(line),
-		 "*** Zephyr AMP on PYNQ-Z1 CPU1 booted (MPIDR=0x%08x VBAR=0x%08x) ***\n",
+		 "MPIDR=0x%08x VBAR=0x%08x\n",
 		 mpidr, vbar);
 	trace_append(line);
 
@@ -105,8 +117,8 @@ int main(void)
 		k_msleep(1000);
 		tick++;
 		snprintf(line, sizeof(line),
-			 "Zephyr CPU1 heartbeat tick=%u uptime_ms=%lld\n",
-			 tick, k_uptime_get());
+			 "Zephyr CPU1 heartbeat tick=%u uptime_ms=%u\n",
+			 tick, (uint32_t)k_uptime_get_32());
 		trace_append(line);
 	}
 
