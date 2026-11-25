@@ -1,0 +1,52 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Device Tree Overlay for Digilent PYNQ-Z1 (Linux 6.6.10-xilinx-v2024.1 on CPU0
+ * + Zephyr RTOS on CPU1 via xlnx,zynq_remoteproc).
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			reserved-memory {
+				#address-cells = <1>;
+				#size-cells = <1>;
+				ranges;
+
+				rproc_0_reserved: rproc@1e000000 {
+					no-map;
+					reg = <0x1e000000 0x01000000>;
+				};
+
+				vdev0vring0: vdev0vring0@1f000000 {
+					no-map;
+					reg = <0x1f000000 0x00004000>;
+				};
+
+				vdev0vring1: vdev0vring1@1f004000 {
+					no-map;
+					reg = <0x1f004000 0x00004000>;
+				};
+
+				vdev0buffer: vdev0buffer@1f008000 {
+					compatible = "shared-dma-pool";
+					no-map;
+					reg = <0x1f008000 0x00100000>;
+				};
+			};
+
+			remoteproc0: remoteproc@0 {
+				compatible = "xlnx,zynq_remoteproc";
+				interrupt-parent = <&intc>;
+				memory-region = <&rproc_0_reserved>,
+						<&vdev0vring0>,
+						<&vdev0vring1>,
+						<&vdev0buffer>;
+			};
+		};
+	};
+};

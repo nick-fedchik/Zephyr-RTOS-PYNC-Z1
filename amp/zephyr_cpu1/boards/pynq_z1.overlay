@@ -1,0 +1,31 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Relocate Zephyr into the 16 MiB remoteproc carveout (0x1e000000) and disable
+ * peripherals owned by Linux on CPU0 (UART0, GEM0).
+ */
+
+/ {
+	model = "Digilent PYNQ-Z1 (AMP CPU1 remoteproc)";
+
+	chosen {
+		/delete-property/ zephyr,console;
+		/delete-property/ zephyr,shell-uart;
+	};
+};
+
+&sram0 {
+	reg = <0x1e000000 DT_SIZE_M(16)>;
+};
+
+&uart0 {
+	status = "disabled";
+};
+
+&gem0 {
+	status = "disabled";
+};
+
+&gem0_mdio {
+	status = "disabled";
+};
