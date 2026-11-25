@@ -1,105 +1,133 @@
 # ZephyrOS-PYNC-Z1
 
-Zephyr RTOS (`v4.5.0`) bring-up on a Digilent PYNQ-Z1 (Xilinx Zynq-7000 `XC7Z020`)
-without installing Vivado or Vitis. It provides a native out-of-tree HWMv2 board
-definition (`boards/digilent/pynq_z1/`) with UART0 (`MIO14`/`MIO15`), the
-325 MHz ARM global timer, and 1G Ethernet (`gem0`) with a fixed locally
-administered MAC address and DHCPv4 (`hostname = "pynq1"`).
+Zephyr RTOS (`v4.5.0`) on a **Digilent PYNQ-Z1** (Xilinx Zynq-7000 `XC7Z020`,
+dual Cortex-A9 + Artix-7 FPGA) without installing AMD Vivado or Vitis.
 
-**This does not synthesize an FPGA bitstream or `BOOT.BIN`.** Instead, it reuses
-the verified `BOOT.BIN` (FSBL + U-Boot) from the official PYNQ-Z1 SD image for
-DDR3 and MIO initialization.
+Verified on hardware:
+- **Native out-of-tree HWMv2 board definition** (`boards/digilent/pynq_z1/`):
+  UART0 console (`MIO14`/`MIO15`, `LVCMOS33`, 100 MHz), 325 MHz ARM global
+  timer (`arch_timer`), 511 MiB DDR3 (`sram0` at `0x00100000`), and 1G Ethernet
+  (`gem0`, `phyaddr 0`, `rgmii-id`).
+- **Networking & diagnostics**: DHCPv4 client, `net` shell, `zperf` TCP/UDP
+  benchmark server, and optional two-stage **TFTP netboot** (`boot.scr` ->
+  `netboot.scr` -> `zephyr.bin`) with automatic SD fallback.
+- **Dual-core Cortex-A9 SMP (`CONFIG_SMP=y`, 2 CPUs)**: SCU + `ACTLR.SMP|FW`
+  coherency, `pm_cpu_on()` via `0xFFFFFFF0 + sev`, and `smp info` / `smp test`
+  shell commands.
+- **AMP / OpenAMP (`amp/`)**: stock **PYNQ Linux 6.6.10** on CPU0 + **Zephyr
+  v4.5.0** on CPU1 (`0x1e000000`, `VBAR`, `CONFIG_GIC_SAFE_CONFIG=y`) with
+  `remoteproc0/trace0` logging and bidirectional **RPMsg** (`/dev/rpmsg0` over
+  GICv1 SGI 14/15, ~140 µs RTT).
+- **Upstream Zephyr `v4.5.0` patches (`patches/`)**: reproducible fix for a
+  GICv1/v2 inter-core SGI drop bug in `isr_wrapper.S` (documented in
+  [`docs/zephyr-gic-v1-v2-sgi-bug.md`](docs/zephyr-gic-v1-v2-sgi-bug.md)) and
+  Zynq-7000 SMP/AMP SoC support.
 
-## Automated local setup and build
+> **Scope note:** This repository does not synthesize an FPGA bitstream or
+> `BOOT.BIN`. Instead, it reuses the verified `BOOT.BIN` (FSBL + U-Boot) from
+> the official PYNQ-Z1 SD image for DDR3 and MIO initialization.
 
-`./setup_and_build.sh` sets up a self-contained Zephyr workspace (`.venv/`,
-`.tools/`, `zephyr-ws/`), installs the minimal Zephyr SDK `1.0.1`
-(`arm-zephyr-eabi`), builds `zephyr.bin` for the native `pynq_z1` board
-(`-DBOARD_ROOT=...`), extracts `BOOT.BIN` from the official PYNQ-Z1 image,
-and stages `sd_card_files/` with `boot.scr` (using `LOAD_ADDR` for `fatload`
-and `ENTRY_ADDR` for `go`):
+## Repository layout
+
+- `boards/digilent/pynq_z1/` — native Zephyr HWMv2 board definition
+- `src/` — main app (`main.c`), SMP bring-up & shell (`zynq7000_smp.c`), and
+  single-core CPU1 bare-metal wake-up/SGI test (`cpu1_cmd.c`, `cpu1_trampoline.S`)
+- `amp/` — Linux DT overlay (`openamp.dts`), Zephyr CPU1 AMP/OpenAMP firmware
+  (`amp/zephyr_cpu1/`), and build script (`amp/build_amp.sh`)
+- `patches/` — patches auto-applied to `zephyr-ws/zephyr` by `setup_and_build.sh`
+- `docs/` — technical memos (including `docs/zephyr-gic-v1-v2-sgi-bug.md`)
+- `setup_and_build.sh` — self-contained local workspace, SDK `1.0.1`, build,
+  and boot-script staging
+- `ROADMAP.md` — project milestones and verification status
+
+## Quick start (automated build)
+
+Install Debian/Ubuntu prerequisites:
+
+```sh
+sudo apt install -y git cmake ninja-build gperf ccache device-tree-compiler \
+	wget xz-utils unzip u-boot-tools mtools python3-venv picocom
+```
+
+Run the self-contained setup and build (keeps `.venv/`, `.tools/`, `zephyr-ws/`,
+`build/`, and `sd_card_files/` inside the repository):
 
 ```sh
 ./setup_and_build.sh
-# optional: enable two-stage TFTP netboot (U-Boot uses DHCP unless BOARD_IP is set)
-./setup_and_build.sh --tftp-server 192.168.1.10
-# or put persistent overrides (TFTP_SERVER_IP, BOARD_IP, BOARD_MAC, ...) in git-ignored local.conf
-# or reuse a local PYNQ-Z1 archive/image, or skip image download:
-./setup_and_build.sh --pynq-image /path/to/pynq_z1_v3.1.1.zip
-./setup_and_build.sh --skip-pynq-image
 ```
 
-## Build the Zephyr image manually
+By default, `setup_and_build.sh` generates a **standalone SD-card `boot.scr`**
+with no hardcoded network addresses. Useful options:
 
-Install the Zephyr SDK with the ARM toolchain and initialize a Zephyr workspace
-following the [Zephyr getting-started guide](https://docs.zephyrproject.org/latest/develop/getting_started/index.html).
-From that workspace, build this application:
+```sh
+# Enable two-stage TFTP netboot (U-Boot uses DHCP unless BOARD_IP is set):
+./setup_and_build.sh --tftp-server 192.168.1.10
+
+# Reuse a local PYNQ-Z1 image archive or skip downloading BOOT.BIN:
+./setup_and_build.sh --pynq-image /path/to/pynq_z1_v3.1.1.zip
+./setup_and_build.sh --skip-pynq-image
+
+# Full list of options and environment overrides:
+./setup_and_build.sh --help
+```
+
+Persistent machine-specific overrides (`TFTP_SERVER_IP`, `BOARD_IP`,
+`BOARD_NETMASK`, `BOARD_GW`, `BOARD_MAC`, `TFTP_PREFIX`, `TFTP_DIR`) can be
+placed in a git-ignored `local.conf` file in the repository root.
+
+> Note: `boards/digilent/pynq_z1/pynq_z1.dts` sets a default locally
+> administered `local-mac-address` on `&gem0` because PYNQ-Z1 has no MAC EEPROM;
+> adjust it if you run multiple boards on the same LAN.
+
+## Flashing & booting standalone Zephyr (2-core SMP)
+
+1. Copy `BOOT.BIN`, `boot.scr`, and `zephyr.bin` from `sd_card_files/` to the
+   root of a FAT32 microSD card (keep a backup of your original PYNQ card).
+2. Set `JP4` to **`SD`**, connect micro-USB to **`PROG UART`**, and open the
+   UART0 console (`115200 8N1`, typically `/dev/ttyUSB1`):
+   ```sh
+   sudo picocom -b 115200 /dev/ttyUSB1
+   ```
+3. Power on the board. `boot.scr` loads `zephyr.bin` to `LOAD_ADDR`
+   (`0x00100000`), disables caches (`dcache off; icache off`), and jumps to the
+   ELF `ENTRY_ADDR` via `go` (`bootm` / `uImage` is not needed).
+4. In the Zephyr shell (`uart:~$`), try `smp info`, `smp test`, `net iface`, or
+   `zperf tcp download 5001`.
+
+## Building AMP / OpenAMP (PYNQ Linux on CPU0 + Zephyr on CPU1)
+
+After running `./setup_and_build.sh` once (to initialize `zephyr-ws/` with
+`libmetal` and `open-amp` and apply `patches/`), build the AMP artifacts:
+
+```sh
+./amp/build_amp.sh
+```
+
+This produces `amp/build/openamp.dtbo` (plus merged `amp/build/pynq-amp.dtb`
+if `sd_backup/image.ub` is present) and `amp/build/zephyr_amp.elf`. Boot stock
+PYNQ `v3.1` Linux (`6.6.10-xilinx-v2024.1`, which already ships with
+`zynq_remoteproc`, `virtio_rpmsg_bus`, and `rpmsg_char`) with `pynq-amp.dtb`,
+then on the board:
+
+```sh
+sudo cp /tmp/zephyr_amp.elf /lib/firmware/zephyr_amp.elf
+sudo modprobe zynq_remoteproc virtio_rpmsg_bus rpmsg_ctrl rpmsg_char
+echo zephyr_amp.elf | sudo tee /sys/class/remoteproc/remoteproc0/firmware
+echo start | sudo tee /sys/class/remoteproc/remoteproc0/state
+sudo cat /sys/kernel/debug/remoteproc/remoteproc0/trace0
+ls -la /dev/rpmsg0
+```
+
+## Manual Zephyr build
+
+From an initialized Zephyr `v4.5.0` workspace with Zephyr SDK `1.0.1` and
+`patches/` applied:
 
 ```sh
 west build -b pynq_z1 /path/to/ZephyrOS-PYNC-Z1 -d /path/to/build -- \
 	-DBOARD_ROOT=/path/to/ZephyrOS-PYNC-Z1
 ```
 
-The raw image is `/path/to/build/zephyr/zephyr.bin`. The board definition
-(`boards/digilent/pynq_z1/`) configures UART0 (`MIO14`/`MIO15`, `LVCMOS33`,
-100 MHz clock) via `pinctrl_uart0_default`, sets `&arch_timer` to 325 MHz,
-reserves the low 1 MiB of DDR3 (`sram0` at `0x00100000`), and enables `&gem0`
-with `local-mac-address = [9e 5c 1a 8a bf 53]`.
+## License
 
-## Reuse a PYNQ boot image
-
-Download the official PYNQ-Z1 image for the board and mount its boot partition
-read-only. For example, `losetup` can expose the image partitions:
-
-```sh
-loopdev=$(sudo losetup --find --show --read-only --partscan PYNQ-Z1.img)
-lsblk "$loopdev"
-sudo mount -o ro "${loopdev}p1" /mnt
-```
-
-Copy the image's `BOOT.BIN` (and any separate U-Boot payload required by that
-image) to a FAT32 SD card. This reuses the board's known-good first-stage
-initialization instead of substituting ZedBoard/Zybo DDR settings. Do not
-assume every PYNQ release has the same partition layout or boot files; inspect
-the mounted image first. Detach the loop device after unmounting:
-
-```sh
-sudo umount /mnt
-sudo losetup --detach "$loopdev"
-```
-
-The alternative of copying `ps7_init_gpl.c` from PYNQ into
-`board/xilinx/zynq/custom_hw_platform/` is not a verified upstream U-Boot
-procedure. That directory is not present in the current Xilinx U-Boot tree,
-and PYNQ v3.0.1's `boards/Pynq-Z1/base` contains a Vivado Tcl design rather
-than a ready-to-copy `ps7_init_gpl.c`. Do not rely on that recipe without
-finding a specific maintained patch or build configuration.
-
-## Boot handoff
-
-Once the reused PYNQ image has initialized the board and reached U-Boot, copy
-`BOOT.BIN`, `zephyr.bin`, and the generated `boot.scr` from `sd_card_files/` to
-the FAT32 boot partition. Because `zephyr.bin` is a flat binary linked at
-`LOAD_ADDR` (`0x00100000`) while the ELF entry point (`ENTRY_ADDR`) may sit at
-an offset within the image, `boot.scr` loads to `LOAD_ADDR` and jumps to
-`ENTRY_ADDR`:
-
-```text
-fatload mmc 0:1 <LOAD_ADDR> zephyr.bin
-dcache off
-icache off
-go <ENTRY_ADDR>
-```
-
-Use `go` for the raw Zephyr binary. `bootm` is the Linux boot path and a Linux
-`uImage` wrapper is not required.
-
-## Boot image and FPGA
-
-No PYNQ-Z1 `BOOT.BIN` is included or generated here. Bootgen packages boot
-partitions; it does not generate the board-specific DDR initialization needed
-by the first-stage loader. The open-source [Bootgen](https://github.com/Xilinx/bootgen)
-README currently requires OpenSSL 3.5 or newer to build it.
-
-The CPU-only serial demo does not need an FPGA bitstream. Loading a `.bit`
-file into the PL is a separate, board- and U-Boot-configuration-specific step.
+GPL-3.0 (see [`LICENSE`](LICENSE)); Zephyr board/source files carry `SPDX-License-Identifier: Apache-2.0`.
