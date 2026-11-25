@@ -25,6 +25,10 @@ cpu1_entry:
 	 *  #8  heartbeat
 	 *  #12 run_cmd  (1 = run, 0 = park in WFE)
 	 *  #16 state    (1 = running, 0 = stopped/parked)
+	 *  #20 req_seq  (incremented by CPU0)
+	 *  #24 req_arg  (input from CPU0)
+	 *  #28 rsp_seq  (written by CPU1 when reply is ready)
+	 *  #32 rsp_val  (result = req_arg * req_arg)
 	 */
 	ldr r0, =cpu1_shm
 
@@ -37,6 +41,9 @@ cpu1_entry:
 	dsb sy
 
 1:
+	/* Handle pending IPC request from CPU0 if req_seq != rsp_seq */
+	bl cpu1_check_ipc
+
 	/* Check run_cmd */
 	ldr r2, [r0, #12]
 	cmp r2, #0
@@ -49,9 +56,11 @@ cpu1_entry:
 	str r3, [r0, #8]
 	dsb sy
 
-	/* Delay loop (~tens of ms at 650 MHz with caches off) */
+	/* Delay loop (~tens of ms), polling IPC every 256 iterations */
 	ldr r4, =2000000
 2:
+	tst r4, #0xFF
+	bleq cpu1_check_ipc
 	subs r4, r4, #1
 	bne 2b
 	b 1b
@@ -63,5 +72,24 @@ cpu1_entry:
 	dsb sy
 	wfe
 	b 1b
+
+/* Leaf helper: if req_seq != rsp_seq, compute rsp_val = req_arg^2 and raise GIC SGI#7 to CPU0 */
+cpu1_check_ipc:
+	ldr r5, [r0, #20]
+	ldr r6, [r0, #28]
+	cmp r5, r6
+	bxeq lr
+	ldr r6, [r0, #24]
+	mul r7, r6, r6
+	str r7, [r0, #32]
+	dsb sy
+	str r5, [r0, #28]
+	dsb sy
+	/* Trigger GICv1 SGI #7 targeted to CPU0 (GICD_SGIR = 0xF8F01F00) */
+	ldr r5, =0xF8F01F00
+	ldr r6, =0x00010007
+	str r6, [r5]
+	dsb sy
+	bx lr
 
 	.size cpu1_entry, . - cpu1_entry
