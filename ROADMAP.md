@@ -9,17 +9,18 @@ This roadmap tracks the bring-up and R&D milestones for running Zephyr RTOS (`v4
 - [x] Serial console bring-up on `uart0` (`MIO14`/`MIO15`, `LVCMOS33`, 100 MHz, 115200 baud) with explicit `pinctrl_uart0_default` and 325 MHz ARM global timer (`arch_timer`).
 - [x] Verified boot banner and application output on hardware via `picocom`.
 
-## Phase 2: Networking & Diagnostics (In Progress)
+## Phase 2: Networking & Diagnostics (Completed)
 
 - [x] Enable 1G Ethernet (`gem0`, `phyaddr 0`, `rgmii-id`) with a fixed locally administered MAC (`9e:5c:1a:8a:bf:53`), DHCPv4 client, and `net` shell.
 - [x] Verify 1000 Mb full-duplex link, DHCPv4 lease acquisition, and ICMP ping (~1.1 ms) on hardware.
 - [x] Add network throughput benchmarking (`zperf`), `NET_STATISTICS`, and mDNS responder (`pynq1.local`) to `prj.conf`.
-- [ ] Flash and verify the native `pynq_z1` build (`pynq1.local` + `zperf`) on hardware.
+- [x] Verify native `pynq_z1` build (`hostname=pynq1`) and `zperf` TCP benchmark on hardware (`21.4 Mbps` baseline with default 16 KB TCP window).
+- [ ] *(Optional)* Tune TCP/GEM buffers (`CONFIG_SPEED_OPTIMIZATIONS`, larger TCP window / `NET_BUF_DATA_SIZE`) and check mDNS multicast RX filtering on `eth_xlnx_gem`.
 
 ## Phase 3: Native `pynq_z1` Board Port (In Progress)
 
 - [x] Replace the `zedboard` + overlay workaround with an out-of-tree HWMv2 board definition under `boards/digilent/pynq_z1/` (`board.yml`, `Kconfig.pynq_z1`, `Kconfig.defconfig`, `pynq_z1_defconfig`, `pynq_z1.dts`, `pynq_z1-pinctrl.dtsi`) to build directly via `west build -b pynq_z1`.
-- [ ] Verify the native `pynq_z1` build on hardware (UART0 + 1G Ethernet/DHCPv4).
+- [x] Verify the native `pynq_z1` build on hardware (UART0 + 1G Ethernet/DHCPv4 + `zperf`).
 - [ ] Verify additional PS peripherals (GPIO, SDHC0, QSPI, I2C, USB) against the PYNQ-Z1 hardware preset.
 
 ## Phase 4: Dual-Core & Heterogeneous Computing (AMP / SMP)
