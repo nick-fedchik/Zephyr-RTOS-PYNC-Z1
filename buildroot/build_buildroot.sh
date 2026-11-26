@@ -48,7 +48,9 @@ fi
 # Prepare staging rootfs overlay (init script, zephyr_amp.elf, optional SSH key)
 rm -rf "${OVERLAY_STAGE}"
 mkdir -p "${OVERLAY_STAGE}/etc/init.d" "${OVERLAY_STAGE}/lib/firmware" \
+         "${OVERLAY_STAGE}/lib/modules/7.3.6-pynq-z1-rt" \
          "${OVERLAY_STAGE}/usr/bin" "${OVERLAY_STAGE}/root/.ssh"
+: > "${OVERLAY_STAGE}/lib/modules/7.3.6-pynq-z1-rt/modules.dep"
 cp "${ROOT_DIR}/buildroot/rootfs-overlay/etc/init.d/S90zephyr-amp" \
    "${OVERLAY_STAGE}/etc/init.d/S90zephyr-amp"
 chmod 0755 "${OVERLAY_STAGE}/etc/init.d/S90zephyr-amp"

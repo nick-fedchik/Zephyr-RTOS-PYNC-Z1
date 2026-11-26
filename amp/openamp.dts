@@ -49,4 +49,18 @@
 			};
 		};
 	};
+
+	fragment@1 {
+		target = <&gem0>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			phy-handle = <&phy_pynq>;
+			local-mac-address = [9e 5c 1a 8a bf 53];
+
+			phy_pynq: ethernet-phy@0 {
+				reg = <0>;
+			};
+		};
+	};
 };
