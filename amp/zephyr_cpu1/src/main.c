@@ -173,6 +173,55 @@ static void blink_timer_cb(struct k_timer *timer)
 
 static K_TIMER_DEFINE(pl_blink_timer, blink_timer_cb, NULL);
 
+/* 1 kHz real-time jitter benchmark (325 MHz Cortex-A9 Global Timer) */
+struct jitter_bench {
+	struct k_sem done;
+	uint32_t target_samples;
+	uint32_t count;
+	uint32_t prev_cyc;
+	uint32_t min_cyc;
+	uint32_t max_cyc;
+	uint32_t max_err_cyc;
+	uint64_t sum_cyc;
+};
+
+static struct jitter_bench jbench;
+
+static void jitter_timer_cb(struct k_timer *timer)
+{
+	uint32_t now = k_cycle_get_32();
+
+	if (jbench.count > 0U) {
+		uint32_t dt = now - jbench.prev_cyc;
+		uint32_t expected = CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC / 1000U;
+		uint32_t err = (dt > expected) ? (dt - expected) : (expected - dt);
+
+		if (dt < jbench.min_cyc) {
+			jbench.min_cyc = dt;
+		}
+		if (dt > jbench.max_cyc) {
+			jbench.max_cyc = dt;
+		}
+		if (err > jbench.max_err_cyc) {
+			jbench.max_err_cyc = err;
+		}
+		jbench.sum_cyc += dt;
+	}
+
+	jbench.prev_cyc = now;
+	jbench.count++;
+
+	/* Toggle LD0 on every tick to prove live PL I/O inside the 1 kHz ISR */
+	sys_write32(jbench.count & 0x1U, AXI_LED_BASE + AXI_GPIO_DATA);
+
+	if (jbench.count > jbench.target_samples) {
+		k_timer_stop(timer);
+		k_sem_give(&jbench.done);
+	}
+}
+
+static K_TIMER_DEFINE(jitter_timer, jitter_timer_cb, NULL);
+
 static void sgi_kick_isr(const void *arg)
 {
 	ARG_UNUSED(arg);
@@ -237,6 +286,43 @@ static int raw_ept_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
 			k_timer_start(&pl_blink_timer, K_NO_WAIT, K_MSEC(ms));
 			snprintf(tx_buf, sizeof(tx_buf), "OK blink=%u ms\n", ms);
 		}
+	} else if (strncmp(rx_buf, "jitter", 6) == 0) {
+		uint32_t samples = (rx_buf[6] == ' ') ? (uint32_t)strtoul(&rx_buf[7], NULL, 0) : 1000U;
+
+		if (samples < 10U || samples > 10000U) {
+			samples = 1000U;
+		}
+
+		k_timer_stop(&pl_blink_timer);
+		blink_period_ms = 0U;
+
+		k_sem_init(&jbench.done, 0, 1);
+		jbench.target_samples = samples;
+		jbench.count = 0U;
+		jbench.min_cyc = UINT32_MAX;
+		jbench.max_cyc = 0U;
+		jbench.max_err_cyc = 0U;
+		jbench.sum_cyc = 0U;
+
+		k_timer_start(&jitter_timer, K_MSEC(1), K_MSEC(1));
+		k_sem_take(&jbench.done, K_MSEC(samples + 2000U));
+
+		uint32_t min_ns = (uint32_t)(((uint64_t)jbench.min_cyc * 1000000000ULL) /
+					     CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC);
+		uint32_t max_ns = (uint32_t)(((uint64_t)jbench.max_cyc * 1000000000ULL) /
+					     CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC);
+		uint32_t avg_ns = (uint32_t)(((jbench.sum_cyc / samples) * 1000000000ULL) /
+					     CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC);
+		uint32_t jit_ns = (uint32_t)(((uint64_t)jbench.max_err_cyc * 1000000000ULL) /
+					     CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC);
+
+		snprintf(tx_buf, sizeof(tx_buf),
+			 "OK n=%u min_us=%u.%03u max_us=%u.%03u avg_us=%u.%03u max_jitter_us=%u.%03u\n",
+			 samples,
+			 min_ns / 1000U, min_ns % 1000U,
+			 max_ns / 1000U, max_ns % 1000U,
+			 avg_ns / 1000U, avg_ns % 1000U,
+			 jit_ns / 1000U, jit_ns % 1000U);
 	} else if (strcmp(rx_buf, "read") == 0) {
 		uint32_t btns = sys_read32(AXI_BTN_BASE + AXI_GPIO_DATA) & 0xFU;
 		uint32_t sws = sys_read32(AXI_SW_BASE + AXI_GPIO_DATA) & 0x3U;

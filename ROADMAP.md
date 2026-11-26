@@ -37,6 +37,6 @@ This roadmap tracks the bring-up and R&D milestones for running Zephyr RTOS (`v4
 ## Phase 5: FPGA (PL) & Multi-Board Lab (In Progress)
 
 - [x] Drive FPGA PL peripherals from Zephyr CPU1 without Vivado: map PYNQ `base.bin` AXI GPIO (`0x41200000..0x4125ffff`: `LD0-LD3`, RGB `LD4-LD5`, `BTN0-BTN3`, `SW0-SW1`) and control them from Python on Linux CPU0 over `/dev/rpmsg0` (`led`, `rgb`, `blink`, `read`) at **127–133 µs** RTT.
-- [ ] Measure real-time PL interrupt latency/jitter (Linux userspace vs Zephyr CPU1).
+- [x] Measure real-time 1 kHz timer jitter under 100% Linux CPU0 load (C `clock_nanosleep` vs Zephyr CPU1 `k_timer` + PL AXI GPIO toggle): **9279.5 µs** max jitter on Linux vs **0.360 µs** on Zephyr CPU1 (~25,000× improvement).
 - [ ] Multi-architecture Zephyr lab: link STM32 (SPI/I2C/ADC sensing) and ESP32 (Wi-Fi/BLE) with PYNQ-Z1 acting as a 1G Ethernet gateway and real-time processor.
 - [x] Publish Part 1 technical article (`DOU/DOU-Zephyr-RTOS-on-PYNQ-Z1-without-Vivado-UA.md`) and draft Part 2 (`AMP/OpenAMP + FPGA PL`).
