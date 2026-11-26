@@ -34,8 +34,9 @@ This roadmap tracks the bring-up and R&D milestones for running Zephyr RTOS (`v4
   - [x] Add bidirectional RPMsg channel (`open-amp` + `libmetal` over GICv1 SGI 14/15, endpoint `"rpmsg-raw"` -> Linux `/dev/rpmsg0`): verified live echo round-trip from Python on PYNQ Linux to Zephyr CPU1 at **137–179 µs** RTT!
 - [x] **2-core SMP on Cortex-A9 (`CONFIG_SMP=y`, `CONFIG_MP_MAX_NUM_CPUS=2`):** verified on hardware (`smp info` scheduled on CPU1 `MPIDR=0x80000001`; `smp test` ran pinned workers concurrently on CPU0 and CPU1 with parallel wall time matching max core time). Reproducible via `patches/0002-soc-xlnx-zynq7000-enable-smp-coherency-and-ipi.patch` + `src/zynq7000_smp.c` (`pm_cpu_on`) + `CONFIG_FPU=n` workaround for `CONFIG_USE_SWITCH` + `CONFIG_FPU_SHARING` mismatch in `thread.c`/`exc.S`.
 
-## Phase 5: FPGA (PL) & Multi-Board Lab
+## Phase 5: FPGA (PL) & Multi-Board Lab (In Progress)
 
-- [ ] Load a prebuilt `.bit` bitstream from U-Boot (`fpga loadb`) before jumping to Zephyr and access AXI peripherals / DMA from a Zephyr driver.
+- [x] Drive FPGA PL peripherals from Zephyr CPU1 without Vivado: map PYNQ `base.bin` AXI GPIO (`0x41200000..0x4125ffff`: `LD0-LD3`, RGB `LD4-LD5`, `BTN0-BTN3`, `SW0-SW1`) and control them from Python on Linux CPU0 over `/dev/rpmsg0` (`led`, `rgb`, `blink`, `read`) at **127–133 µs** RTT.
+- [ ] Measure real-time PL interrupt latency/jitter (Linux userspace vs Zephyr CPU1).
 - [ ] Multi-architecture Zephyr lab: link STM32 (SPI/I2C/ADC sensing) and ESP32 (Wi-Fi/BLE) with PYNQ-Z1 acting as a 1G Ethernet gateway and real-time processor.
-- [ ] Publish a technical article documenting the bring-up, pitfalls (`pinctrl`, `LOAD_ADDR` vs `ENTRY_ADDR`, SDK `1.0.1`), and AMP architecture.
+- [x] Publish Part 1 technical article (`DOU/DOU-Zephyr-RTOS-on-PYNQ-Z1-without-Vivado-UA.md`) and draft Part 2 (`AMP/OpenAMP + FPGA PL`).

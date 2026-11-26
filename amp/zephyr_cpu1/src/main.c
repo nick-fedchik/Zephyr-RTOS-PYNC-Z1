@@ -23,6 +23,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define AMP_TRACE_BUF_SIZE 2048U
@@ -40,6 +41,14 @@
 #define SGI_FROM_LINUX_0 14U
 #define SGI_FROM_LINUX_1 15U
 #define SGI_TO_LINUX     15U
+
+/* PYNQ-Z1 base.bit AXI GPIO physical addresses (from base.hwh) */
+#define AXI_SW_BASE      0x41200000U /* SW0-SW1 (2 bits) */
+#define AXI_BTN_BASE     0x41210000U /* BTN0-BTN3 (4 bits) */
+#define AXI_RGB_BASE     0x41240000U /* LD4-LD5 RGB (6 bits) */
+#define AXI_LED_BASE     0x41250000U /* LD0-LD3 (4 bits) */
+#define AXI_GPIO_DATA    0x00U
+#define AXI_GPIO_TRI     0x04U
 
 #define RPMSG_SVC_NAME "rpmsg-raw"
 
@@ -143,6 +152,26 @@ static metal_phys_addr_t rsc_phys;
 static struct rpmsg_virtio_device rvdev;
 static struct rpmsg_endpoint raw_ept;
 static uint32_t msg_count;
+static uint32_t blink_period_ms;
+static uint8_t blink_step;
+
+static void axi_gpio_init_pl(void)
+{
+	/* Configure LD0-LD3 and RGB LD4-LD5 as outputs (TRI=0) */
+	sys_write32(0x0U, AXI_LED_BASE + AXI_GPIO_TRI);
+	sys_write32(0x0U, AXI_RGB_BASE + AXI_GPIO_TRI);
+}
+
+static void blink_timer_cb(struct k_timer *timer)
+{
+	static const uint8_t pattern[4] = { 0x1U, 0x2U, 0x4U, 0x8U };
+
+	ARG_UNUSED(timer);
+	sys_write32(pattern[blink_step & 0x3U], AXI_LED_BASE + AXI_GPIO_DATA);
+	blink_step++;
+}
+
+static K_TIMER_DEFINE(pl_blink_timer, blink_timer_cb, NULL);
 
 static void sgi_kick_isr(const void *arg)
 {
@@ -169,6 +198,7 @@ static int raw_ept_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
 	char tx_buf[192];
 	size_t copy_len = (len < sizeof(rx_buf) - 1U) ? len : (sizeof(rx_buf) - 1U);
 
+	ARG_UNUSED(src);
 	ARG_UNUSED(priv);
 
 	memcpy(rx_buf, data, copy_len);
@@ -178,10 +208,47 @@ static int raw_ept_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
 	}
 
 	msg_count++;
-	snprintf(tx_buf, sizeof(tx_buf), "[Zephyr CPU1 #%u] echo: %s\n", msg_count, rx_buf);
 	trace_append("RX: ");
 	trace_append(rx_buf);
 	trace_append("\n");
+
+	if (strncmp(rx_buf, "led ", 4) == 0) {
+		uint32_t val = (uint32_t)strtoul(&rx_buf[4], NULL, 0) & 0xFU;
+
+		k_timer_stop(&pl_blink_timer);
+		blink_period_ms = 0U;
+		sys_write32(val, AXI_LED_BASE + AXI_GPIO_DATA);
+		snprintf(tx_buf, sizeof(tx_buf), "OK led=0x%x\n", val);
+	} else if (strncmp(rx_buf, "rgb ", 4) == 0) {
+		uint32_t val = (uint32_t)strtoul(&rx_buf[4], NULL, 0) & 0x3FU;
+
+		sys_write32(val, AXI_RGB_BASE + AXI_GPIO_DATA);
+		snprintf(tx_buf, sizeof(tx_buf), "OK rgb=0x%02x\n", val);
+	} else if (strncmp(rx_buf, "blink ", 6) == 0) {
+		uint32_t ms = (uint32_t)strtoul(&rx_buf[6], NULL, 0);
+
+		if (ms == 0U) {
+			k_timer_stop(&pl_blink_timer);
+			blink_period_ms = 0U;
+			sys_write32(0U, AXI_LED_BASE + AXI_GPIO_DATA);
+			snprintf(tx_buf, sizeof(tx_buf), "OK blink=stopped\n");
+		} else {
+			blink_period_ms = ms;
+			k_timer_start(&pl_blink_timer, K_NO_WAIT, K_MSEC(ms));
+			snprintf(tx_buf, sizeof(tx_buf), "OK blink=%u ms\n", ms);
+		}
+	} else if (strcmp(rx_buf, "read") == 0) {
+		uint32_t btns = sys_read32(AXI_BTN_BASE + AXI_GPIO_DATA) & 0xFU;
+		uint32_t sws = sys_read32(AXI_SW_BASE + AXI_GPIO_DATA) & 0x3U;
+		uint32_t leds = sys_read32(AXI_LED_BASE + AXI_GPIO_DATA) & 0xFU;
+		uint32_t rgb = sys_read32(AXI_RGB_BASE + AXI_GPIO_DATA) & 0x3FU;
+
+		snprintf(tx_buf, sizeof(tx_buf),
+			 "OK btns=0x%x sw=0x%x leds=0x%x rgb=0x%02x blink_ms=%u\n",
+			 btns, sws, leds, rgb, blink_period_ms);
+	} else {
+		snprintf(tx_buf, sizeof(tx_buf), "[Zephyr CPU1 #%u] echo: %s\n", msg_count, rx_buf);
+	}
 
 	(void)rpmsg_send(ept, tx_buf, strlen(tx_buf));
 	return RPMSG_SUCCESS;
@@ -203,7 +270,8 @@ int main(void)
 	int ret;
 
 	amp_trace_pos = 0U;
-	trace_append("*** Zephyr AMP + OpenAMP on PYNQ-Z1 CPU1 booted ***\n");
+	axi_gpio_init_pl();
+	trace_append("*** Zephyr AMP + OpenAMP + PL AXI GPIO on PYNQ-Z1 CPU1 booted ***\n");
 	snprintf(line, sizeof(line), "MPIDR=0x%08x VBAR=0x%08x\n",
 		 __get_MPIDR(), __get_VBAR());
 	trace_append(line);

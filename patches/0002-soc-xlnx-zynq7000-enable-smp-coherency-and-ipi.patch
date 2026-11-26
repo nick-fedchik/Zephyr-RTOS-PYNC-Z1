@@ -12,7 +12,7 @@ index e8cdde30540..020e72945d1 100644
  config AARCH32_ARMV8_A
  	bool
 diff --git a/soc/xlnx/zynq7000/common/soc.c b/soc/xlnx/zynq7000/common/soc.c
-index b60b8377e12..a4a4abf9a4d 100644
+index b60b8377e12..2de9c1161fe 100644
 --- a/soc/xlnx/zynq7000/common/soc.c
 +++ b/soc/xlnx/zynq7000/common/soc.c
 @@ -16,6 +16,13 @@
@@ -29,7 +29,7 @@ index b60b8377e12..a4a4abf9a4d 100644
  #define AXI_GPIO_MMU_ENTRY(id)\
  	MMU_REGION_FLAT_ENTRY("axigpio",\
  			      DT_REG_ADDR(id),\
-@@ -28,6 +35,16 @@ static const struct arm_mmu_region mmu_regions[] = {
+@@ -28,6 +35,20 @@ static const struct arm_mmu_region mmu_regions[] = {
  			      0x00000000,
  			      0x1000,
  			      MT_STRONGLY_ORDERED | MPERM_R | MPERM_X),
@@ -42,11 +42,15 @@ index b60b8377e12..a4a4abf9a4d 100644
 +			      0x1F000000,
 +			      0x00108000,
 +			      MT_STRONGLY_ORDERED | MPERM_R | MPERM_W),
++	MMU_REGION_FLAT_ENTRY("pynq_base_axi_gpio",
++			      0x41200000,
++			      0x00060000,
++			      MT_DEVICE | MATTR_SHARED | MPERM_R | MPERM_W),
 +#endif
  	MMU_REGION_FLAT_ENTRY("mpcore",
  			      0xF8F00000,
  			      0x2000,
-@@ -84,6 +101,26 @@ void soc_reset_hook(void)
+@@ -84,6 +105,26 @@ void soc_reset_hook(void)
  	sctlr &= ~SCTLR_A_Msk;
  	__set_SCTLR(sctlr);
  
