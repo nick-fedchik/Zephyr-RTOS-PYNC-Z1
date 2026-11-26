@@ -14,12 +14,23 @@ Verified on hardware:
 - **Dual-core Cortex-A9 SMP (`CONFIG_SMP=y`, 2 CPUs)**: SCU + `ACTLR.SMP|FW`
   coherency, `pm_cpu_on()` via `0xFFFFFFF0 + sev`, and `smp info` / `smp test`
   shell commands.
-- **AMP / OpenAMP (`amp/`)**: stock **PYNQ Linux 6.6.10** on CPU0 + **Zephyr
-  v4.5.0** on CPU1 (`0x1e000000`, `VBAR`, `CONFIG_GIC_SAFE_CONFIG=y`) with
-  `remoteproc0/trace0` logging and bidirectional **RPMsg** (`/dev/rpmsg0` over
-  GICv1 SGI 14/15, ~140 µs RTT).
-- **Upstream Zephyr `v4.5.0` patches (`patches/`)**: reproducible fix for a
-  GICv1/v2 inter-core SGI drop bug in `isr_wrapper.S` (documented in
+- **AMP / OpenAMP (`amp/`)**: **Linux** (stock PYNQ `6.6.10` or custom
+  Mainline `7.3.6 PREEMPT_RT`) on CPU0 + **Zephyr 4.5.0** on CPU1
+  (`0x1e000000`, `VBAR`, `CONFIG_GIC_SAFE_CONFIG=y`) with `remoteproc0/trace0`
+  logging, bidirectional **RPMsg** (`/dev/rpmsg0` over GICv1 SGI 14/15,
+  ~100–140 µs RTT), FPGA PL AXI GPIO control, 1 kHz sub-microsecond jitter
+  (`< 1 µs`), and independent 1 kHz `FAILSAFE` supervisor.
+- **Minimal Mainline Linux `7.3.6` (`linux/`)**: `SMP PREEMPT_RT` `zImage`
+  (`5.3 MiB`, all required drivers built-in including `zynq-fpga`, `rpmsg`,
+  `XADC`, `Cadence Watchdog`, `USB Host/Serial`, `OF_OVERLAY`, and ported
+  `zynq_remoteproc.c`).
+- **Embedded Linux `initramfs` (`buildroot/`)**: Buildroot `2026.08.2` minimal
+  `rootfs.cpio.uboot` (`3.37 MiB`, `14 MiB` RAM used, `5.58 s` full boot to
+  Dropbear SSH + Zephyr CPU1 + `/dev/rpmsg0`, `cyclictest` 1 kHz max `39 µs`,
+  native C `/usr/bin/rpmsg-cli`).
+- **Upstream Zephyr `4.5.0` patches (`patches/`)**: reproducible fix for a
+  GICv1/v2 inter-core SGI drop bug in `isr_wrapper.S` (upstream `#122600` /
+  `PR #123040`, documented in
   [`docs/zephyr-gic-v1-v2-sgi-bug.md`](docs/zephyr-gic-v1-v2-sgi-bug.md)) and
   Zynq-7000 SMP/AMP SoC support.
 
@@ -32,8 +43,13 @@ Verified on hardware:
 - `boards/digilent/pynq_z1/` — native Zephyr HWMv2 board definition
 - `src/` — main app (`main.c`), SMP bring-up & shell (`zynq7000_smp.c`), and
   single-core CPU1 bare-metal wake-up/SGI test (`cpu1_cmd.c`, `cpu1_trampoline.S`)
-- `amp/` — Linux DT overlay (`openamp.dts`), Zephyr CPU1 AMP/OpenAMP firmware
-  (`amp/zephyr_cpu1/`), and build script (`amp/build_amp.sh`)
+- `amp/` — Linux DT overlay (`openamp.dts`, including `&gem0` `phy-handle` fix),
+  Zephyr CPU1 AMP/OpenAMP firmware (`amp/zephyr_cpu1/`), and `amp/build_amp.sh`
+- `linux/` — minimal Mainline Linux `7.3.6` `PREEMPT_RT` config
+  (`pynq_z1_min_defconfig`), ported `zynq_remoteproc.c`, and `build_linux.sh`
+- `buildroot/` — Buildroot `2026.08.2` `initramfs` config (`pynq_z1_defconfig`),
+  C `/dev/rpmsg0` client (`rpmsg-cli.c`), `S90zephyr-amp` autostart init script,
+  and `build_buildroot.sh`
 - `patches/` — patches auto-applied to `zephyr-ws/zephyr` by `setup_and_build.sh`
 - `docs/` — technical memos (including `docs/zephyr-gic-v1-v2-sgi-bug.md`)
 - `setup_and_build.sh` — self-contained local workspace, SDK `1.0.1`, build,
@@ -117,6 +133,38 @@ echo start | sudo tee /sys/class/remoteproc/remoteproc0/state
 sudo cat /sys/kernel/debug/remoteproc/remoteproc0/trace0
 ls -la /dev/rpmsg0
 ```
+
+## Building minimal Mainline Linux 7.3.6 (`PREEMPT_RT`)
+
+Requires `gcc-arm-linux-gnueabihf` (`sudo apt install -y gcc-arm-linux-gnueabihf`).
+Downloads Mainline Linux `7.3.6` into git-ignored `.tools/linux/`, installs
+`linux/pynq_z1_min_defconfig` and the ported `linux/zynq_remoteproc.c`, and
+compiles `zImage` (~5.3 MiB, all drivers built-in):
+
+```sh
+./linux/build_linux.sh
+# Optional: stage zImage-7.3.6 to a TFTP directory (or set TFTP_DIR in local.conf)
+./linux/build_linux.sh --tftp-dir /srv/tftp/pynq1
+```
+
+## Building minimal Embedded Linux `initramfs` (Buildroot)
+
+Downloads Buildroot `2026.08.2` into git-ignored `.tools/buildroot/` (using a
+pre-built Bootlin `armv7-eabihf` external toolchain), cross-compiles
+`buildroot/rpmsg-cli.c`, bundles `amp/build/zephyr_amp.elf` + `S90zephyr-amp`
++ your `~/.ssh/id_*.pub` key (if present), and builds `rootfs.cpio.uboot`
+(~3.37 MiB):
+
+```sh
+./buildroot/build_buildroot.sh
+# Optional: stage rootfs.cpio.uboot to a TFTP directory
+./buildroot/build_buildroot.sh --tftp-dir /srv/tftp/pynq1
+```
+
+Booting `base.bin` (`fpga load 0`) + `zImage-7.3.6` + `pynq-amp.dtb` +
+`rootfs.cpio.uboot` via U-Boot `bootz` brings up the complete Linux `7.3.6 RT`
++ Dropbear SSH + Zephyr `4.5.0` CPU1 + `/dev/rpmsg0` stack in ~5.6 seconds
+using ~14 MiB of RAM.
 
 ## Manual Zephyr build
 
