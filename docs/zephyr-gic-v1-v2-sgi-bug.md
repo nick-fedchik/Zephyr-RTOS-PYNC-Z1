@@ -7,6 +7,7 @@
   - `arch/arm/core/cortex_a_r/isr_wrapper.S` (both `#ifndef CONFIG_USE_SWITCH` around line 184 and `#else` / `CONFIG_USE_SWITCH` around line 346)
   - `drivers/interrupt_controller/intc_gic.c` (`arm_gic_get_active()` lines 172–188, `arm_gic_eoi()` lines 191–205)
 - **Reference implementation in Zephyr:** `arch/arm64/core/isr_wrapper.S` (lines 67–74)
+- **Upstream status:** Independently reported in [zephyrproject-rtos/zephyr#122600](https://github.com/zephyrproject-rtos/zephyr/issues/122600) and fixed on `main` after `v4.5.0` by [PR #123040](https://github.com/zephyrproject-rtos/zephyr/pull/123040) (`bic r0, r0, #0x1c00` in both `isr_wrapper.S` paths). Still present in release tag `v4.5.0`, so our local patch remains required for `v4.5.0` builds.
 - **Local fix patch:** `patches/0001-arch-arm-cortex_a_r-mask-gic-v1-v2-intid-in-isr-wrapper.patch`
 
 ## Summary
