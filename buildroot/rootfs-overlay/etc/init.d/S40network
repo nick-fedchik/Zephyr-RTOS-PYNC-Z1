@@ -1,0 +1,25 @@
+#!/bin/sh
+# Bring up network interfaces asynchronously so boot does not block on
+# Ethernet PHY auto-negotiation (~3 s) or DHCP.
+
+case "$1" in
+  start)
+    printf "Starting network (async): "
+    mkdir -p /run/network
+    /sbin/ifup -a >/dev/null 2>&1 &
+    echo "OK"
+    ;;
+  stop)
+    printf "Stopping network: "
+    /sbin/ifdown -a >/dev/null 2>&1
+    echo "OK"
+    ;;
+  restart|reload)
+    "$0" stop
+    "$0" start
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac

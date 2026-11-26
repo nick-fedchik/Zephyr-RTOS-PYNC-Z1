@@ -51,9 +51,9 @@ mkdir -p "${OVERLAY_STAGE}/etc/init.d" "${OVERLAY_STAGE}/lib/firmware" \
          "${OVERLAY_STAGE}/lib/modules/7.3.6-pynq-z1-rt" \
          "${OVERLAY_STAGE}/usr/bin" "${OVERLAY_STAGE}/root/.ssh"
 : > "${OVERLAY_STAGE}/lib/modules/7.3.6-pynq-z1-rt/modules.dep"
-cp "${ROOT_DIR}/buildroot/rootfs-overlay/etc/init.d/S90zephyr-amp" \
-   "${OVERLAY_STAGE}/etc/init.d/S90zephyr-amp"
-chmod 0755 "${OVERLAY_STAGE}/etc/init.d/S90zephyr-amp"
+cp "${ROOT_DIR}/buildroot/rootfs-overlay/etc/init.d/"* \
+   "${OVERLAY_STAGE}/etc/init.d/"
+chmod 0755 "${OVERLAY_STAGE}/etc/init.d/"*
 
 # Include Zephyr CPU1 AMP ELF if available
 ZEPHYR_ELF=""
