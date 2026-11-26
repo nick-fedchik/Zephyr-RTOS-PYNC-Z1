@@ -230,14 +230,30 @@ enum ctrl_state {
 };
 
 #define FAILSAFE_TIMEOUT_MS 500U
+#define FAILSAFE_REBOOT_MS  5000U
+#define SLCR_UNLOCK_REG     0xF8000008U
+#define SLCR_PSS_RST_CTRL   0xF8000200U
 #define RGB_BLUE_BOTH       0x09U /* LD4 blue (bit 0) + LD5 blue (bit 3) */
 #define RGB_GREEN_BOTH      0x12U /* LD4 green (bit 1) + LD5 green (bit 4) */
 #define RGB_RED_BOTH        0x24U /* LD4 red (bit 2) + LD5 red (bit 5) */
 
 static volatile enum ctrl_state ctrl_mode = CTRL_DISARMED;
 static volatile uint32_t last_cmd_ms;
+static volatile uint32_t failsafe_enter_ms;
 static volatile uint32_t ctrl_tick_count;
 static volatile uint32_t failsafe_reason; /* 0=none, 1=timeout, 2=BTN0 kill */
+
+static void zynq_ps_hardware_reset(void)
+{
+	/* Unlock Zynq-7000 SLCR and assert PSS_RST_CTRL (full PS reset) */
+	sys_write32(0xDF0DU, SLCR_UNLOCK_REG);
+	__DSB();
+	sys_write32(0x1U, SLCR_PSS_RST_CTRL);
+	__DSB();
+	for (;;) {
+		__WFE();
+	}
+}
 
 static const char *ctrl_state_str(enum ctrl_state s)
 {
@@ -269,6 +285,7 @@ static void ctrl_timer_cb(struct k_timer *timer)
 		} else if ((now_ms - last_cmd_ms) > FAILSAFE_TIMEOUT_MS) {
 			ctrl_mode = CTRL_FAILSAFE;
 			failsafe_reason = 1U;
+			failsafe_enter_ms = now_ms;
 			sys_write32(0U, AXI_LED_BASE + AXI_GPIO_DATA);
 			sys_write32(RGB_RED_BOTH, AXI_RGB_BASE + AXI_GPIO_DATA);
 			trace_append("FAILSAFE: Linux command timeout (>500 ms) on CPU1\n");
@@ -278,6 +295,13 @@ static void ctrl_timer_cb(struct k_timer *timer)
 		uint32_t red = ((ctrl_tick_count / 125U) & 0x1U) ? RGB_RED_BOTH : 0U;
 
 		sys_write32(red, AXI_RGB_BASE + AXI_GPIO_DATA);
+
+		/* If Linux stays dead for 5 s after timeout, hardware-reset PS */
+		if (failsafe_reason == 1U &&
+		    (k_uptime_get_32() - failsafe_enter_ms) >= FAILSAFE_REBOOT_MS) {
+			trace_append("FAILSAFE: Linux dead 5s -> SLCR PSS_RST_CTRL reset\n");
+			zynq_ps_hardware_reset();
+		}
 	}
 }
 
