@@ -18,6 +18,11 @@
 	reg = <0x1e000000 DT_SIZE_M(16)>;
 };
 
+/* PYNQ Linux configures Cortex-A9 GTC_CTRL prescaler=1 (/2): 325 MHz / 2 = 162.5 MHz */
+&arch_timer {
+	clock-frequency = <162500000>;
+};
+
 &uart0 {
 	status = "disabled";
 };

@@ -222,6 +222,67 @@ static void jitter_timer_cb(struct k_timer *timer)
 
 static K_TIMER_DEFINE(jitter_timer, jitter_timer_cb, NULL);
 
+/* Real-time 1 kHz failsafe supervisor (Linux heartbeat watchdog + PL BTN0 kill) */
+enum ctrl_state {
+	CTRL_DISARMED = 0,
+	CTRL_ARMED = 1,
+	CTRL_FAILSAFE = 2,
+};
+
+#define FAILSAFE_TIMEOUT_MS 500U
+#define RGB_BLUE_BOTH       0x09U /* LD4 blue (bit 0) + LD5 blue (bit 3) */
+#define RGB_GREEN_BOTH      0x12U /* LD4 green (bit 1) + LD5 green (bit 4) */
+#define RGB_RED_BOTH        0x24U /* LD4 red (bit 2) + LD5 red (bit 5) */
+
+static volatile enum ctrl_state ctrl_mode = CTRL_DISARMED;
+static volatile uint32_t last_cmd_ms;
+static volatile uint32_t ctrl_tick_count;
+static volatile uint32_t failsafe_reason; /* 0=none, 1=timeout, 2=BTN0 kill */
+
+static const char *ctrl_state_str(enum ctrl_state s)
+{
+	switch (s) {
+	case CTRL_ARMED:
+		return "ARMED";
+	case CTRL_FAILSAFE:
+		return "FAILSAFE";
+	default:
+		return "DISARMED";
+	}
+}
+
+static void ctrl_timer_cb(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	ctrl_tick_count++;
+
+	if (ctrl_mode == CTRL_ARMED) {
+		uint32_t btns = sys_read32(AXI_BTN_BASE + AXI_GPIO_DATA) & 0xFU;
+		uint32_t now_ms = k_uptime_get_32();
+
+		if ((btns & 0x1U) != 0U) {
+			ctrl_mode = CTRL_FAILSAFE;
+			failsafe_reason = 2U;
+			sys_write32(0U, AXI_LED_BASE + AXI_GPIO_DATA);
+			sys_write32(RGB_RED_BOTH, AXI_RGB_BASE + AXI_GPIO_DATA);
+			trace_append("FAILSAFE: physical kill BTN0 triggered on CPU1\n");
+		} else if ((now_ms - last_cmd_ms) > FAILSAFE_TIMEOUT_MS) {
+			ctrl_mode = CTRL_FAILSAFE;
+			failsafe_reason = 1U;
+			sys_write32(0U, AXI_LED_BASE + AXI_GPIO_DATA);
+			sys_write32(RGB_RED_BOTH, AXI_RGB_BASE + AXI_GPIO_DATA);
+			trace_append("FAILSAFE: Linux command timeout (>500 ms) on CPU1\n");
+		}
+	} else if (ctrl_mode == CTRL_FAILSAFE) {
+		/* Flash RGB LEDs red at 4 Hz while in failsafe */
+		uint32_t red = ((ctrl_tick_count / 125U) & 0x1U) ? RGB_RED_BOTH : 0U;
+
+		sys_write32(red, AXI_RGB_BASE + AXI_GPIO_DATA);
+	}
+}
+
+static K_TIMER_DEFINE(ctrl_timer, ctrl_timer_cb, NULL);
+
 static void sgi_kick_isr(const void *arg)
 {
 	ARG_UNUSED(arg);
@@ -323,6 +384,43 @@ static int raw_ept_cb(struct rpmsg_endpoint *ept, void *data, size_t len,
 			 max_ns / 1000U, max_ns % 1000U,
 			 avg_ns / 1000U, avg_ns % 1000U,
 			 jit_ns / 1000U, jit_ns % 1000U);
+	} else if (strcmp(rx_buf, "arm") == 0) {
+		k_timer_stop(&pl_blink_timer);
+		blink_period_ms = 0U;
+		last_cmd_ms = k_uptime_get_32();
+		failsafe_reason = 0U;
+		ctrl_mode = CTRL_ARMED;
+		sys_write32(RGB_GREEN_BOTH, AXI_RGB_BASE + AXI_GPIO_DATA);
+		k_timer_start(&ctrl_timer, K_MSEC(1), K_MSEC(1));
+		snprintf(tx_buf, sizeof(tx_buf),
+			 "OK state=ARMED timeout_ms=%u\n", FAILSAFE_TIMEOUT_MS);
+	} else if (strcmp(rx_buf, "disarm") == 0) {
+		k_timer_stop(&ctrl_timer);
+		ctrl_mode = CTRL_DISARMED;
+		failsafe_reason = 0U;
+		sys_write32(0U, AXI_LED_BASE + AXI_GPIO_DATA);
+		sys_write32(RGB_BLUE_BOTH, AXI_RGB_BASE + AXI_GPIO_DATA);
+		snprintf(tx_buf, sizeof(tx_buf), "OK state=DISARMED\n");
+	} else if (strncmp(rx_buf, "set ", 4) == 0) {
+		uint32_t mask = (uint32_t)strtoul(&rx_buf[4], NULL, 0) & 0xFU;
+
+		if (ctrl_mode == CTRL_ARMED) {
+			uint32_t now_ms = k_uptime_get_32();
+			uint32_t age_ms = now_ms - last_cmd_ms;
+
+			last_cmd_ms = now_ms;
+			sys_write32(mask, AXI_LED_BASE + AXI_GPIO_DATA);
+			snprintf(tx_buf, sizeof(tx_buf),
+				 "OK state=ARMED mask=0x%x age_ms=%u\n", mask, age_ms);
+		} else {
+			snprintf(tx_buf, sizeof(tx_buf),
+				 "ERR state=%s reason=%u\n",
+				 ctrl_state_str(ctrl_mode), failsafe_reason);
+		}
+	} else if (strcmp(rx_buf, "state") == 0) {
+		snprintf(tx_buf, sizeof(tx_buf),
+			 "OK state=%s reason=%u ticks=%u\n",
+			 ctrl_state_str(ctrl_mode), failsafe_reason, ctrl_tick_count);
 	} else if (strcmp(rx_buf, "read") == 0) {
 		uint32_t btns = sys_read32(AXI_BTN_BASE + AXI_GPIO_DATA) & 0xFU;
 		uint32_t sws = sys_read32(AXI_SW_BASE + AXI_GPIO_DATA) & 0x3U;
