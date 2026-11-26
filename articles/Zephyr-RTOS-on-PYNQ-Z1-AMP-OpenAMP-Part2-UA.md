@@ -99,7 +99,7 @@ Zephyr CPU1 heartbeat tick=2 uptime_ms=2000
 
 ## 5. Двосторонній канал OpenAMP / RPMsg (`/dev/rpmsg0`) через GICv1 SGI 14/15
 
-Драйвер `zynq_remoteproc` у Linux 6.6 використовує для сповіщень vring два програмні переривання GICv1: **SGI #14** (Linux → CPU1) та **SGI #15** (CPU1 → Linux). Я додав у `west` модулі `libmetal` і `open-amp`, замапив спільну область `0x1f000000` (`0x108000` байт) як некешовану (`MT_STRONGLY_ORDERED` — у прототипі це найпростіший спосіб гарантувати суворий порядок записів без ризику розсинхрону кешів, хоча для максимальної швидкодії та строгої відповідності Linux `ioremap_wc` правильніше використовувати `Normal Non-Cacheable`), додав у `.resource_table` запис `RSC_VDEV` (`VIRTIO_ID_RPMSG`) і підняв endpoint `"rpmsg-raw"`.
+Драйвер `zynq_remoteproc` використовує для сповіщень між ядрами два програмні переривання GICv1: **SGI #14** (Linux → CPU1) та **SGI #15** (CPU1 → Linux). На стороні Zephyr я підключив бібліотеки `libmetal` і `open-amp`, описав у таблиці ресурсів `.resource_table` віртуальний пристрій RPMsg і підняв канал `"rpmsg-raw"`. Спільну ділянку буферів `0x1f000000` (трохи більше 1 МБ) замапив як некешовану (`MT_STRONGLY_ORDERED` — найпростіший варіант для прототипу без розсинхрону кешів, хоча для повної відповідності Linux `ioremap_wc` правильніше використовувати `Normal Non-Cacheable`).
 
 Після завантаження модулів `virtio_rpmsg_bus`, `rpmsg_ctrl` і `rpmsg_char` Linux автоматично створив пристрій **`/dev/rpmsg0`**:
 
