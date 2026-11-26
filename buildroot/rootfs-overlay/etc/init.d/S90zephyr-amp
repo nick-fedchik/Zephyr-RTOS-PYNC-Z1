@@ -1,0 +1,45 @@
+#!/bin/sh
+# Start/stop Zephyr RTOS on Zynq-7000 CPU1 via zynq_remoteproc
+
+RPROC="/sys/class/remoteproc/remoteproc0"
+FPGA="/sys/class/fpga_manager/fpga0/state"
+FW="zephyr_amp.elf"
+
+case "$1" in
+  start)
+    mountpoint -q /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
+    if [ ! -d "$RPROC" ]; then
+      echo "zephyr-amp: remoteproc0 not present"
+      exit 0
+    fi
+    if [ -r "$FPGA" ] && [ "$(cat "$FPGA")" != "operating" ]; then
+      echo "zephyr-amp: FPGA PL not programmed (state=$(cat "$FPGA")), skipping CPU1 start"
+      exit 0
+    fi
+    if [ ! -f "/lib/firmware/$FW" ]; then
+      echo "zephyr-amp: /lib/firmware/$FW not found"
+      exit 0
+    fi
+    if [ "$(cat "$RPROC/state")" != "running" ]; then
+      printf "Starting Zephyr CPU1 (%s)... " "$FW"
+      echo "$FW" > "$RPROC/firmware"
+      echo start > "$RPROC/state"
+      echo "OK"
+    fi
+    ;;
+  stop)
+    if [ -d "$RPROC" ] && [ "$(cat "$RPROC/state")" = "running" ]; then
+      printf "Stopping Zephyr CPU1... "
+      echo stop > "$RPROC/state"
+      echo "OK"
+    fi
+    ;;
+  restart)
+    "$0" stop
+    "$0" start
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac
