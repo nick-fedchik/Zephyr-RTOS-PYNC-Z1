@@ -52,16 +52,40 @@ flowchart LR
 
 ---
 
-## 2. Перша збірка: на що звернути увагу при `west build`
+## 2. Розгортання Zephyr 4.5.0 і збірка образу під PYNQ-Z1
 
-Усі інструменти я ізолював всередині папки проєкту скриптом [`setup_and_build.sh`](https://github.com/nick-fedchik/Zephyr-RTOS-PYNC-Z1/blob/main/setup_and_build.sh) (`.venv/`, `.tools/`, `zephyr-ws/`), щоб не засмічувати систему. Під час розгортання **Zephyr 4.5.0** вилізли три нюанси:
+Усі інструменти я ізолював всередині папки проєкту скриптом [`setup_and_build.sh`](https://github.com/nick-fedchik/Zephyr-RTOS-PYNC-Z1/blob/main/setup_and_build.sh) (`.venv/`, `.tools/`, `zephyr-ws/`), щоб не засмічувати хост-систему. Повний відтворюваний процес на Ubuntu/Debian виглядає так:
 
-1. **У маніфесті немає модуля `hal_xilinx`.** Код для Zynq-7000 лежить прямо в основному дереві Zephyr (`soc/xlnx/zynq7000/`). Крім того, `west config manifest.project-filter` приймає регулярний вираз, а не glob (`-*` падає з помилкою). Мінімальний робочий фільтр:
+1. **Встановити базові пакети хоста:**
    ```sh
-   west config manifest.project-filter -- "-.*,+cmsis,+picolibc"
+   sudo apt install -y git cmake ninja-build gperf ccache device-tree-compiler \
+       wget xz-utils unzip u-boot-tools mtools python3-venv picocom
    ```
-2. **Потрібен Zephyr SDK 1.0.x.** У Zephyr 4.5.0 скрипт `FindZephyr-sdk.cmake` відхиляє SDK `0.17.0` і вимагає `1.0.x`. Я поставив мінімальний бандл `1.0.1` лише з тулчейном `arm-zephyr-eabi`. Звернув увагу, що в 1.0.1 змінився шлях до утиліт: замість `arm-zephyr-eabi/bin/` тепер `gnu/arm-zephyr-eabi/bin/`.
-3. **`LOAD_ADDR` і `ENTRY_ADDR` — це різні адреси.** Сирий `zephyr.bin` не містить ELF-заголовків. Якщо завантажити його командою `fatload` на адресу точки входу, усі абсолютні посилання з’їдуть. Тож `fatload` (або `tftpboot`) має класти бінарник на базову адресу першого сегмента `LOAD`, а `go` — стрибати на `Entry point address`:
+2. **Розгорнути робочий простір `west` із Zephyr `4.5.0` і мінімальними модулями:**
+   ```sh
+   python3 -m venv .venv && source .venv/bin/activate
+   pip install west
+   west init -m https://github.com/zephyrproject-rtos/zephyr --mr v4.5.0 zephyr-ws
+   cd zephyr-ws
+   west config manifest.project-filter -- "-.*,+cmsis,+picolibc"
+   west update --narrow -o=--depth=1
+   pip install -r zephyr/scripts/requirements-base.txt
+   ```
+   *(У маніфесті Zephyr немає окремого модуля `hal_xilinx` — код для Zynq-7000 лежить прямо в основному дереві `soc/xlnx/zynq7000/`. Зверніть увагу, що `project-filter` приймає регулярний вираз, а не glob: `-*` падає з помилкою.)*
+3. **Завантажити Zephyr SDK `1.0.1` (`arm-zephyr-eabi`):** у Zephyr `4.5.0` скрипт `FindZephyr-sdk.cmake` відхиляє старіший SDK `0.17.0` і вимагає `1.0.x`. Достатньо мінімального бандлу `1.0.1` лише з архітектурою `arm-zephyr-eabi` (у 1.0.1 шлях до бінарників змінився на `gnu/arm-zephyr-eabi/bin/`).
+4. **Застосувати локальні патчі з `patches/` і зібрати образ під наш out-of-tree порт `pynq_z1`:**
+   ```sh
+   export ZEPHYR_TOOLCHAIN_VARIANT=zephyr
+   export ZEPHYR_SDK_INSTALL_DIR="$PWD/.tools/zephyr-sdk-1.0.1"
+   west build -p always -b pynq_z1 . -d build -- -DBOARD_ROOT=.
+   ```
+   Або запустити весь цикл (завантаження SDK, `west`, патчі, збірка `zephyr.bin` та генерація `boot.scr`) однією командою:
+   ```sh
+   ./setup_and_build.sh                 # автономна збірка під microSD
+   ./setup_and_build.sh --tftp-server 192.168.0.10  # з TFTP netboot
+   ```
+
+Окремий важливий нюанс під час формування завантажувального скрипту U-Boot: **`LOAD_ADDR` і `ENTRY_ADDR` — це різні адреси.** Сирий `zephyr.bin` не містить ELF-заголовків. Якщо завантажити його командою `fatload` на адресу точки входу, усі абсолютні посилання з’їдуть. Тож `fatload` (або `tftpboot`) має класти бінарник на базову адресу першого сегмента `LOAD`, а `go` — стрибати на `Entry point address`:
 
 $$A_{\text{load}} = \texttt{0x00100000}, \quad A_{\text{entry}} = \texttt{0x00102BBC}, \quad \Delta = \texttt{0x2BBC}\text{ байт}$$
 
@@ -305,11 +329,27 @@ Total wall time (parallel): 11574 us
 
 ---
 
+## 8. Де доречний 2-ядерний SMP на Zephyr (і коли краще обрати AMP)
+
+Попри популярність зв’язки Linux + RTOS, чистий **2-ядерний SMP на Zephyr** на Zynq-7000 має чітку інженерну нішу, де Linux був би зайвим баластом:
+
+- **Системи з миттєвим стартом (< 1 с) і без файлової системи.** Уся прошивка `zephyr.bin` займає ~300 КБ, не потребує rootfs, не боїться раптового зняття живлення і готова до роботи менш ніж за секунду після U-Boot.
+- **Високошвидкісний збір даних (DAQ) і стрімінг по 1G Ethernet.** Одне ядро може обслуговувати DMA-буфери з FPGA PL (наприклад, швидкісні АЦП, SDR або відеокадри в 511 МБ DDR3), а друге — паралельно пакувати й відправляти сирі Ethernet/UDP-фрейми через `gem0` без затримок мережевого стеку Linux.
+- **Багатопотокові промислові шлюзи й контролери руху.** Коли потрібні сотні мегабайтів ОЗП для буферів/траєкторій, кілька незалежних шин (Ethernet, SPI, I2C, CAN/PWM у PL) і єдина кодова база на C з прогнозованою затримкою переривань, але без накладних витрат на підтримку Linux-дистрибутиву.
+- **Швидке прототипування драйверів FPGA PL.** З одного проєкту Zephyr зручно тестувати власні IP-блоки в PL (AXI MMIO, переривання, DMA) без написання kernel-модулів Linux і без перезбірки ядра.
+
+Водночас, якщо проєкту потрібні SSH, веб-інтерфейс, Python, запис файлів на диск, комп’ютерний зір або готова мережева інфраструктура — краще розділити два ядра в режимі **AMP** (Linux на CPU0 + Zephyr на CPU1), чому присвячена [друга частина](Zephyr-RTOS-on-PYNQ-Z1-AMP-OpenAMP-Part2-UA.md).
+
+---
+
 ## Висновки
 
-- **Що перевірено на залізі:** запуск Zephyr RTOS 4.5.0 на PS-частині PYNQ-Z1 через `BOOT.BIN` із PYNQ v3.1, out-of-tree порт `boards/digilent/pynq_z1/`, консоль UART0 (`pinctrl`), лінк 1G Ethernet + DHCPv4 + `zperf`, двоступеневий TFTP netboot без смикання microSD, між’ядерне переривання GICv1 SGI #7 (7 мкс RTT) та експериментальний запуск 2-ядерного SMP.
-- **Що потребує додаткової перевірки:** повноцінний кабельний тест пропускної здатності GEM (і сирих Ethernet-фреймів без IP), розбір сумісності `CONFIG_FPU_SHARING` із `CONFIG_USE_SWITCH` та перехід на наступний реліз Zephyr після `4.5.0`, де фікс [#123040](https://github.com/zephyrproject-rtos/zephyr/pull/123040) вже буде в ядрі.
-- **Намір на наступні експерименти:** запустити асиметричний режим **AMP / OpenAMP**, де на CPU0 працює Linux (мережа, відео, Python), а на CPU1 буде працювати ізольований real-time Zephyr із обміном через `/dev/rpmsg0` і можливістю підключення програмованої логіки FPGA (PL).
+- **Запуск Zephyr на Zynq-7000 без Vivado повністю робочий:** перевикористання офіційного `BOOT.BIN` із PYNQ v3.1 знімає залежність від десятків гігабайтів AMD Vivado/Vitis, коли достатньо процесорної частини PS (або готового бітстріму PL).
+- **Zynq-7000 суттєво відрізняється від класичних MCU:** замість лінійного старту з Flash тут працюють BootROM → FSBL → U-Boot, окремі `LOAD_ADDR` і `ENTRY_ADDR`, обов’язкове вимкнення кешів перед `go`, `pinctrl` із прив’язкою до напруг банків MIO та MMU з когерентністю SCU.
+- **Out-of-tree HWMv2 board-порт (`boards/digilent/pynq_z1/`) окупається одразу:** замість крихких overlay-файлів поверх чужої плати `zedboard` проєкт отримує чисту конфігурацію саме під залізо PYNQ-Z1 (`325 МГц` GTC, `uart0` 3.3 В, `511 МБ` DDR3, `gem0` 1G Ethernet).
+- **Двоступеневий TFTP netboot змінює темп розробки:** один `boot.scr` на microSD і автооновлення `netboot.scr` + `zephyr.bin` по мережі (`960 KiB/s`) прибирають ручне перекидання карти й перетворюють тест прошивки на одну команду та натискання `SRST`.
+- **Перевірка на живому залізі виявила реальні баги релізу `4.5.0`:** відсутність маскування `GICC_IAR.CPUID` у `isr_wrapper.S` (підтверджений upstream `#122600` / `PR #123040`, після патча SGI #7 працює за **7 мкс**) та конфлікт стекового фрейму `CONFIG_USE_SWITCH` + `CONFIG_FPU_SHARING`.
+- **Чистий 2-ядерний SMP на Zephyr — сильна база для автономних RT-систем, а AMP — логічний наступний крок:** експериментальний SMP довів паралельну роботу обох Cortex-A9 під одним планувальником, а далі ті самі знання про `SCU`, `GIC` і `VBAR` стали фундаментом для запуску **Linux (CPU0) + Zephyr (CPU1) + FPGA PL** у [другій частині](Zephyr-RTOS-on-PYNQ-Z1-AMP-OpenAMP-Part2-UA.md).
 
 ---
 
