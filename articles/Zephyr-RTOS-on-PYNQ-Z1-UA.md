@@ -342,6 +342,40 @@ Total wall time (parallel): 11574 us
 
 ---
 
+## 9. Підтримана периферія PYNQ-Z1 у Zephyr 4.5.0
+
+Перед стартом реального проєкту на Zynq-7000 важливо розуміти, яка саме периферія PYNQ-Z1 уже має готові драйвери в дереві Zephyr `4.5.0`, а що доведеться залишати на боці U-Boot/Linux або писати самотужки.
+
+### Процесорна частина (PS)
+
+| Периферія PYNQ-Z1 (PS) | Стан у Zephyr 4.5.0 | Драйвер / примітка |
+|---|---|---|
+| `UART0` / `UART1` (USB-UART консоль) | Підтримується (перевірено) | `uart_xlnx_ps.c` (потрібен `pinctrl-0`) |
+| 1G Ethernet (`gem0` + MDIO, RTL8211F) | Підтримується (перевірено) | `eth_xlnx_gem.c`, `mdio_xlnx_gem.c` |
+| `pinctrl` (MIO/EMIO, банки 3.3 В / 1.8 В) | Підтримується (перевірено) | `pinctrl_xlnx_zynq.c` |
+| Таймери (Global Timer, TTC) і GICv1 | Підтримується (перевірено) | `arm_arch_timer`, `counter_xlnx_ttc.c` (+ патч SGI `#122600`) |
+| PS GPIO (MIO/EMIO) | Підтримується | `gpio_xlnx_ps.c`, `gpio_xlnx_ps_bank.c` |
+| I2C / SPI (Cadence PS) | Підтримується | `i2c_cdns.c`, `spi_cdns.c` |
+| microSD (`sdhci0`, Arasan) | Підтримується | `xlnx_sdhc.c` (`xlnx,versal-8.9a` у `zynq7000.dtsi`) |
+| USB Host / OTG (ChipIdea) | Не підтримується | Драйвера Zynq-7000 USB у Zephyr 4.5.0 немає |
+| QSPI Flash (16 МБ на платі) | Не підтримується | У Zephyr є `spi_xlnx_zynqmp_gqspi.c` (лише для ZynqMP) |
+| XADC (температура кристала, АЦП) | Не підтримується | Потрібен Linux (`xilinx-xadc`) або прямий доступ до регістрів |
+| PS DMA (`PL330`) і PS Watchdog | Не підтримується | У Zephyr є лише PL-версії (`AXI DMA`, `AXI WDT`) |
+| DevCfg FPGA Manager (прошивка PL) | Не підтримується | У Zephyr є лише `fpga_zynqmp.c` — бітстрім прошиває U-Boot або Linux |
+
+### Програмована логіка (FPGA PL — AXI IP-блоки)
+
+Якщо у FPGA PL прошитий дизайн зі стандартними IP-ядрами AMD/Xilinx (наприклад, базовий `base.bin` або власний бітстрім), Zephyr `4.5.0` уже має готові драйвери для ключових блоків на шині AXI:
+
+- **GPIO та таймери/PWM:** `gpio_xlnx_axi.c` (AXI GPIO), `counter_xlnx_axi_timer.c`, `pwm_xlnx_axi_timer.c` (апаратний PWM на базі AXI Timer).
+- **Послідовні шини:** `i2c_xilinx_axi.c` (AXI IIC), `spi_xlnx_axi_quadspi.c` (AXI Quad SPI), `uart_xlnx_uartlite.c` (AXI UARTLite).
+- **Швидкісні канали й контроль:** `dma_xilinx_axi_dma.c` (AXI DMA), `eth_xilinx_axienet.c` / `eth_xilinx_axi_ethernet_lite.c`, `wdt_xilinx_axi.c` (AXI Watchdog).
+- **HDMI In/Out та аудіокодек ADAU1761 на PYNQ-Z1:** готової підтримки в Zephyr немає — ці інтерфейси зав’язані на складні відео/аудіо конвеєри в PL і значно природніше працюють під Linux.
+
+Такий розподіл добре підсвічує архітектурну логіку платформи: **чистий Zephyr** ідеально закриває 1G Ethernet, UART, SPI/I2C, microSD та пряму роботу з AXI-периферією в FPGA PL, а коли додаються USB, XADC, PS Watchdog, файлова система чи SSH — найефективніше віддати їх **Linux на CPU0** в режимі AMP, залишивши **Zephyr на CPU1** для жорсткого реального часу.
+
+---
+
 ## Висновки
 
 - **Запуск Zephyr на Zynq-7000 без Vivado повністю робочий:** перевикористання офіційного `BOOT.BIN` із PYNQ v3.1 знімає залежність від десятків гігабайтів AMD Vivado/Vitis, коли достатньо процесорної частини PS (або готового бітстріму PL).
