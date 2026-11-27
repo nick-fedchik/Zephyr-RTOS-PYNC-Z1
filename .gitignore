@@ -6,3 +6,4 @@ build/
 amp/build/
 sd_card_files/
 sd_backup/
+.trash/
