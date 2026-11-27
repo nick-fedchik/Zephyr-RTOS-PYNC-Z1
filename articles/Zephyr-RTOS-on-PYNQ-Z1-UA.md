@@ -210,6 +210,43 @@ DHCPv4 lease acquired: IP=192.168.0.11 mask=255.255.255.0 gw=192.168.0.1
 
 Але при першій спробі `zperf tcp download 5001` консоль відповіла `Failed to start TCP server!`. Перевіривши `subsys/net/lib/sockets/sockets_service.c`, я знайшов причину: сервіс моніторингу сокетів рахує суму poll-дескрипторів усіх увімкнених сервісів (`zperf` UDP + `zperf` TCP + `mDNS` + `eventfd`). Загалом виходило понад 9, тому при `CONFIG_ZVFS_POLL_MAX=9` потік `socket_service` тихо завершувався ще при старті.
 
+Окрім базових мережевих параметрів, у робочому `prj.conf` зібрані всі ключові Kconfig-опції проєкту (консоль/логи, 2-ядерний SMP, мережевий стек, DHCPv4, mDNS, `zperf` та shell):
+
+```ini
+CONFIG_PRINTK=y
+CONFIG_LOG=y
+CONFIG_LOG_MODE_IMMEDIATE=y
+
+# 2-core SMP (CONFIG_FPU=n обходить конфлікт FPU_SHARING + USE_SWITCH у 4.5.0)
+CONFIG_USE_SWITCH=y
+CONFIG_SMP=y
+CONFIG_MP_MAX_NUM_CPUS=2
+CONFIG_PM_CPU_OPS=y
+CONFIG_SCHED_CPU_MASK=y
+CONFIG_KERNEL_SHELL=y
+CONFIG_FPU=n
+
+# 1G Ethernet + DHCPv4 + mDNS + zperf
+CONFIG_NETWORKING=y
+CONFIG_NET_L2_ETHERNET=y
+CONFIG_ETH_DRIVER=y
+CONFIG_NET_IPV4=y
+CONFIG_NET_ARP=y
+CONFIG_NET_UDP=y
+CONFIG_NET_TCP=y
+CONFIG_NET_DHCPV4=y
+CONFIG_NET_SOCKETS=y
+CONFIG_NET_HOSTNAME_ENABLE=y
+CONFIG_NET_HOSTNAME="pynq1"
+CONFIG_MDNS_RESPONDER=y
+CONFIG_NET_ZPERF=y
+CONFIG_NET_ZPERF_SERVER=y
+CONFIG_NET_MAX_CONTEXTS=10
+CONFIG_ZVFS_POLL_MAX=16
+CONFIG_SHELL=y
+CONFIG_NET_SHELL=y
+```
+
 Після збільшення `CONFIG_ZVFS_POLL_MAX=16` (та `CONFIG_NET_MAX_CONTEXTS=10`) тест `iperf` із ноутбука (через Wi-Fi 6 → роутер → 2.5G-свіч → PYNQ-Z1) пройшов чисто:
 
 ```text
