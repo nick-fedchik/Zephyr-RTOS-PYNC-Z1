@@ -409,6 +409,15 @@ Total wall time (parallel): 11574 us
 - **Швидкісні канали й контроль:** `dma_xilinx_axi_dma.c` (AXI DMA), `eth_xilinx_axienet.c` / `eth_xilinx_axi_ethernet_lite.c`, `wdt_xilinx_axi.c` (AXI Watchdog).
 - **HDMI In/Out та аудіокодек ADAU1761 на PYNQ-Z1:** готової підтримки в Zephyr немає — ці інтерфейси зав’язані на складні відео/аудіо конвеєри в PL і значно природніше працюють під Linux.
 
+### Практичні варіанти роботи з USB на Zynq-7000
+
+Оскільки в Zephyr `4.5.0` немає вбудованого драйвера для контролера Zynq-7000 PS USB (ядро ChipIdea з інтерфейсом ULPI), на практиці є чотири робочі варіанти:
+
+1. **Кастомний UDC-драйвер під новий стек USB (`usbd_next`):** реалізувати обгортку в `drivers/usb/udc/`, перенісши низькорівневу ініціалізацію регістрів, дескрипторів DMA та ULPI PHY з офіційного bare-metal драйвера `usbps` із бібліотеки Xilinx/AMD `embeddedsw`.
+2. **Інтеграція стороннього стеку TinyUSB:** швидший шлях без глибокої прив’язки до `usbd_next` — TinyUSB уже має готовий порт для контролерів ChipIdea / Zynq (режими Device і Host) і запускається як окремий потік Zephyr.
+3. **Зовнішній SPI USB-контролер (`MAX3421E`):** якщо апаратна частина дозволяє підключення через Pmod або GPIO, у Zephyr `4.5.0` є готовий драйвер `drivers/usb/uhc/uhc_max3421e.c` для режиму USB Host поверх звичайної шини SPI.
+4. **Гетерогенна конфігурація (AMP):** для повноцінної роботи складних USB-пристроїв або OTG-режиму найпростіше запустити Linux на CPU0 (де драйвер ChipIdea USB працює «з коробки»), а Zephyr — на CPU1 через OpenAMP / `remoteproc` (детально в [другій частині](Zephyr-RTOS-on-PYNQ-Z1-AMP-OpenAMP-Part2-UA.md)).
+
 Такий розподіл добре підсвічує архітектурну логіку платформи: **чистий Zephyr** ідеально закриває 1G Ethernet, UART, SPI/I2C, microSD та пряму роботу з AXI-периферією в FPGA PL, а коли додаються USB, XADC, PS Watchdog, файлова система чи SSH — найефективніше віддати їх **Linux на CPU0** в режимі AMP, залишивши **Zephyr на CPU1** для жорсткого реального часу.
 
 ---
@@ -451,6 +460,7 @@ Total wall time (parallel): 11574 us
 - **MMU** (*Memory Management Unit*) — блок керування віртуальною пам’яттю.
 - **OTG** (*On-The-Go*) — режим USB, що дозволяє контролеру працювати як хост або пристрій.
 - **PL / PS** — програмована логіка (*Programmable Logic*) та процесорна система (*Processing System*) у Zynq.
+- **Pmod** (*Peripheral Module*) — стандартний 6/12-піновий роз’єм Digilent для підключення зовнішніх периферійних модулів.
 - **PWM** (*Pulse-Width Modulation*) — широтно-імпульсна модуляція.
 - **QSPI** (*Quad Serial Peripheral Interface*) — 4-лінійний швидкісний інтерфейс підключення NOR Flash.
 - **RTOS** (*Real-Time Operating System*) — операційна система реального часу.
