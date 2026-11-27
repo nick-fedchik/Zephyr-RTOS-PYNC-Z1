@@ -1,0 +1,391 @@
+diff --git a/drivers/watchdog/CMakeLists.txt b/drivers/watchdog/CMakeLists.txt
+index e8431c2a34c..2cf1cfc5b4a 100644
+--- a/drivers/watchdog/CMakeLists.txt
++++ b/drivers/watchdog/CMakeLists.txt
+@@ -20,6 +20,7 @@ zephyr_library_sources_ifdef(CONFIG_WDT_BFLB wdt_bflb.c)
+ zephyr_library_sources_ifdef(CONFIG_WDT_CC13XX_CC26XX wdt_cc13xx_cc26xx.c)
+ zephyr_library_sources_ifdef(CONFIG_WDT_CC23X0 wdt_cc23x0.c)
+ zephyr_library_sources_ifdef(CONFIG_WDT_CC32XX wdt_cc32xx.c)
++zephyr_library_sources_ifdef(CONFIG_WDT_CDNS wdt_cdns.c)
+ zephyr_library_sources_ifdef(CONFIG_WDT_COUNTER wdt_counter.c)
+ zephyr_library_sources_ifdef(CONFIG_WDT_CRSAS_MA2 wdt_crsas_ma2.c)
+ zephyr_library_sources_ifdef(CONFIG_WDT_DW wdt_dw.c wdt_dw_common.c)
+diff --git a/drivers/watchdog/Kconfig b/drivers/watchdog/Kconfig
+index f3b8320d14e..e55867a1027 100644
+--- a/drivers/watchdog/Kconfig
++++ b/drivers/watchdog/Kconfig
+@@ -90,6 +90,7 @@ source "drivers/watchdog/Kconfig.bflb"
+ source "drivers/watchdog/Kconfig.cc13xx_cc26xx"
+ source "drivers/watchdog/Kconfig.cc23x0"
+ source "drivers/watchdog/Kconfig.cc32xx"
++source "drivers/watchdog/Kconfig.cdns"
+ source "drivers/watchdog/Kconfig.cmsdk_apb"
+ source "drivers/watchdog/Kconfig.crsas_ma2"
+ source "drivers/watchdog/Kconfig.dw"
+diff --git a/drivers/watchdog/Kconfig.cdns b/drivers/watchdog/Kconfig.cdns
+new file mode 100644
+index 00000000000..0719517407c
+--- /dev/null
++++ b/drivers/watchdog/Kconfig.cdns
+@@ -0,0 +1,12 @@
++# Cadence watchdog configuration
++
++# Copyright (c) 2026 Zephyr-RTOS-PYNC-Z1 contributors
++# SPDX-License-Identifier: Apache-2.0
++
++config WDT_CDNS
++	bool "Cadence PS system watchdog driver (Zynq-7000 SWDT)"
++	default y
++	depends on DT_HAS_CDNS_WDT_R1P2_ENABLED
++	help
++	  Enable the driver for the Cadence system watchdog timer found in the
++	  Xilinx Zynq-7000 processing system.
+diff --git a/drivers/watchdog/wdt_cdns.c b/drivers/watchdog/wdt_cdns.c
+new file mode 100644
+index 00000000000..a4e5765c325
+--- /dev/null
++++ b/drivers/watchdog/wdt_cdns.c
+@@ -0,0 +1,276 @@
++/*
++ * Driver for the Cadence system watchdog timer (SWDT) found in the Xilinx
++ * Zynq-7000 processing system (UG585 chapter 8, "System Watchdog Timer").
++ *
++ * Register-level behaviour follows mainline Linux drivers/watchdog/cadence_wdt.c.
++ *
++ * Only a single channel is available. On expiry the timer either resets the
++ * processing system (WDT_FLAG_RESET_SOC) or raises an interrupt that invokes
++ * the installed callback (WDT_FLAG_RESET_NONE).
++ *
++ * Copyright (c) 2026 Zephyr-RTOS-PYNC-Z1 contributors
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#define DT_DRV_COMPAT cdns_wdt_r1p2
++
++#include <errno.h>
++#include <zephyr/kernel.h>
++#include <zephyr/device.h>
++#include <zephyr/irq.h>
++#include <zephyr/sys/util.h>
++#include <zephyr/sys/sys_io.h>
++#include <zephyr/drivers/watchdog.h>
++#include <zephyr/logging/log.h>
++
++LOG_MODULE_REGISTER(wdt_cdns, CONFIG_WDT_LOG_LEVEL);
++
++#define WDT_ZMR     0x00 /* Zero mode register */
++#define WDT_CCR     0x04 /* Counter control register */
++#define WDT_RESTART 0x08 /* Restart register */
++#define WDT_SR      0x0c /* Status register */
++
++#define ZMR_WDEN      BIT(0)
++#define ZMR_RSTEN     BIT(1)
++#define ZMR_IRQEN     BIT(2)
++#define ZMR_RSTLEN_16 (3U << 4) /* reset pulse of 16 pclk cycles */
++#define ZMR_ZKEY      0x00ABC000U
++
++#define CCR_CKSEL_64   1U
++#define CCR_CKSEL_512  2U
++#define CCR_CKSEL_4096 3U
++#define CCR_CRV_SHIFT  2
++#define CCR_CRV_MAX    0xFFFU
++#define CCR_CKEY       0x00920000U
++
++#define RESTART_KEY 0x00001999U
++
++#define SR_WDZ BIT(0)
++
++/* The counter is loaded with (CRV << 12) and clocked by clk / prescaler */
++#define CRV_UNIT_CYCLES 4096ULL
++
++struct cdns_wdt_config {
++	mem_addr_t base;
++	uint32_t clock_rate;
++	void (*irq_config)(void);
++};
++
++struct cdns_wdt_data {
++	struct k_spinlock lock;
++	wdt_callback_t callback;
++	uint32_t ccr;
++	uint32_t zmr_mode;
++	bool timeout_installed;
++	bool started;
++};
++
++static const struct {
++	uint16_t prescaler;
++	uint8_t cksel;
++} cdns_wdt_prescalers[] = {
++	{64, CCR_CKSEL_64},
++	{512, CCR_CKSEL_512},
++	{4096, CCR_CKSEL_4096},
++};
++
++/*
++ * Pick the finest prescaler whose 12-bit reload value covers the requested
++ * timeout. The counter expires after (CRV + 1) units, the same convention as
++ * mainline Linux.
++ */
++static int cdns_wdt_calc_ccr(uint32_t clock_rate, uint32_t timeout_ms, uint32_t *ccr)
++{
++	for (size_t i = 0; i < ARRAY_SIZE(cdns_wdt_prescalers); i++) {
++		const uint64_t unit_cycles = CRV_UNIT_CYCLES * cdns_wdt_prescalers[i].prescaler;
++		const uint64_t cycles = DIV_ROUND_UP((uint64_t)timeout_ms * clock_rate, 1000ULL);
++		const uint64_t units = DIV_ROUND_UP(cycles, unit_cycles);
++		const uint64_t crv = units > 0 ? units - 1 : 0;
++
++		if (crv <= CCR_CRV_MAX) {
++			*ccr = CCR_CKEY | (crv << CCR_CRV_SHIFT) | cdns_wdt_prescalers[i].cksel;
++			return 0;
++		}
++	}
++
++	return -EINVAL;
++}
++
++static int wdt_cdns_setup(const struct device *dev, uint8_t options)
++{
++	const struct cdns_wdt_config *config = dev->config;
++	struct cdns_wdt_data *data = dev->data;
++	k_spinlock_key_t key = k_spin_lock(&data->lock);
++	int ret = 0;
++
++	/* The SWDT keeps counting in sleep and while halted by a debugger */
++	ARG_UNUSED(options);
++
++	if (!data->timeout_installed) {
++		ret = -EINVAL;
++		goto out;
++	}
++
++	if (data->started) {
++		ret = -EBUSY;
++		goto out;
++	}
++
++	/* The counter control register can only be written while the timer is stopped */
++	sys_write32(ZMR_ZKEY, config->base + WDT_ZMR);
++	sys_write32(data->ccr, config->base + WDT_CCR);
++	sys_write32(ZMR_ZKEY | ZMR_WDEN | ZMR_RSTLEN_16 | data->zmr_mode, config->base + WDT_ZMR);
++	sys_write32(RESTART_KEY, config->base + WDT_RESTART);
++	data->started = true;
++
++out:
++	k_spin_unlock(&data->lock, key);
++	return ret;
++}
++
++static int wdt_cdns_disable(const struct device *dev)
++{
++	const struct cdns_wdt_config *config = dev->config;
++	struct cdns_wdt_data *data = dev->data;
++	k_spinlock_key_t key = k_spin_lock(&data->lock);
++	int ret = 0;
++
++	if (!data->started) {
++		ret = -EFAULT;
++		goto out;
++	}
++
++	sys_write32(ZMR_ZKEY, config->base + WDT_ZMR);
++	data->started = false;
++	/* wdt_disable() uninstalls all timeouts */
++	data->timeout_installed = false;
++	data->callback = NULL;
++
++out:
++	k_spin_unlock(&data->lock, key);
++	return ret;
++}
++
++static int wdt_cdns_install_timeout(const struct device *dev, const struct wdt_timeout_cfg *cfg)
++{
++	const struct cdns_wdt_config *config = dev->config;
++	struct cdns_wdt_data *data = dev->data;
++	k_spinlock_key_t key = k_spin_lock(&data->lock);
++	uint32_t ccr;
++	int ret;
++
++	if (data->started) {
++		ret = -EBUSY;
++		goto out;
++	}
++
++	if (data->timeout_installed) {
++		ret = -ENOMEM;
++		goto out;
++	}
++
++	if (cfg->window.min != 0U || cfg->window.max == 0U) {
++		ret = -EINVAL;
++		goto out;
++	}
++
++	switch (cfg->flags & WDT_FLAG_RESET_MASK) {
++	case WDT_FLAG_RESET_SOC:
++		/* The interrupt fires together with the reset, so it cannot warn in advance */
++		if (cfg->callback != NULL) {
++			ret = -ENOTSUP;
++			goto out;
++		}
++		data->zmr_mode = ZMR_RSTEN;
++		break;
++	case WDT_FLAG_RESET_NONE:
++		data->zmr_mode = ZMR_IRQEN;
++		break;
++	default:
++		ret = -ENOTSUP;
++		goto out;
++	}
++
++	ret = cdns_wdt_calc_ccr(config->clock_rate, cfg->window.max, &ccr);
++	if (ret != 0) {
++		LOG_ERR("Timeout of %u ms is out of range", cfg->window.max);
++		goto out;
++	}
++
++	data->ccr = ccr;
++	data->callback = cfg->callback;
++	data->timeout_installed = true;
++	ret = 0;
++
++out:
++	k_spin_unlock(&data->lock, key);
++	return ret;
++}
++
++static int wdt_cdns_feed(const struct device *dev, int channel_id)
++{
++	const struct cdns_wdt_config *config = dev->config;
++	struct cdns_wdt_data *data = dev->data;
++
++	if (channel_id != 0 || !data->timeout_installed) {
++		return -EINVAL;
++	}
++
++	sys_write32(RESTART_KEY, config->base + WDT_RESTART);
++
++	return 0;
++}
++
++static void wdt_cdns_isr(const struct device *dev)
++{
++	const struct cdns_wdt_config *config = dev->config;
++	struct cdns_wdt_data *data = dev->data;
++
++	if ((sys_read32(config->base + WDT_SR) & SR_WDZ) == 0U) {
++		return;
++	}
++
++	if (data->callback != NULL) {
++		data->callback(dev, 0);
++	}
++}
++
++static int wdt_cdns_init(const struct device *dev)
++{
++	const struct cdns_wdt_config *config = dev->config;
++
++	/* Make sure the timer is stopped, whatever the boot loader left behind */
++	sys_write32(ZMR_ZKEY, config->base + WDT_ZMR);
++	config->irq_config();
++
++	return 0;
++}
++
++static DEVICE_API(wdt, wdt_cdns_api) = {
++	.setup = wdt_cdns_setup,
++	.disable = wdt_cdns_disable,
++	.install_timeout = wdt_cdns_install_timeout,
++	.feed = wdt_cdns_feed,
++};
++
++#define WDT_CDNS_INIT(inst)                                                                        \
++	static void wdt_cdns_irq_config_##inst(void)                                               \
++	{                                                                                          \
++		IRQ_CONNECT(DT_INST_IRQN(inst), DT_INST_IRQ(inst, priority), wdt_cdns_isr,         \
++			    DEVICE_DT_INST_GET(inst), DT_INST_IRQ(inst, flags));                   \
++		irq_enable(DT_INST_IRQN(inst));                                                    \
++	}                                                                                          \
++                                                                                                   \
++	static struct cdns_wdt_data wdt_cdns_data_##inst;                                          \
++                                                                                                   \
++	static const struct cdns_wdt_config wdt_cdns_config_##inst = {                             \
++		.base = DT_INST_REG_ADDR(inst),                                                    \
++		.clock_rate = DT_INST_PROP(inst, clock_frequency),                                 \
++		.irq_config = wdt_cdns_irq_config_##inst,                                          \
++	};                                                                                         \
++                                                                                                   \
++	DEVICE_DT_INST_DEFINE(inst, wdt_cdns_init, NULL, &wdt_cdns_data_##inst,                    \
++			      &wdt_cdns_config_##inst, POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE, \
++			      &wdt_cdns_api);
++
++DT_INST_FOREACH_STATUS_OKAY(WDT_CDNS_INIT)
+diff --git a/dts/arm/xilinx/zynq7000.dtsi b/dts/arm/xilinx/zynq7000.dtsi
+index 255e576c85a..00fb5404a46 100644
+--- a/dts/arm/xilinx/zynq7000.dtsi
++++ b/dts/arm/xilinx/zynq7000.dtsi
+@@ -155,6 +155,13 @@
+ 			interrupt-names = "irq_0";
+ 		};
+ 
++		watchdog0: watchdog@f8005000 {
++			compatible = "cdns,wdt-r1p2";
++			reg = <0xf8005000 0x1000>;
++			interrupts = <GIC_SPI 9 IRQ_TYPE_EDGE IRQ_DEFAULT_PRIORITY>;
++			status = "disabled";
++		};
++
+ 		spi0: spi@e0006000 {
+ 			compatible = "cdns,spi";
+ 			reg = <0xe0006000 0x1000>;
+diff --git a/dts/bindings/watchdog/cdns,wdt-r1p2.yaml b/dts/bindings/watchdog/cdns,wdt-r1p2.yaml
+new file mode 100644
+index 00000000000..d292973b0cf
+--- /dev/null
++++ b/dts/bindings/watchdog/cdns,wdt-r1p2.yaml
+@@ -0,0 +1,26 @@
++# Copyright (c) 2026 Zephyr-RTOS-PYNC-Z1 contributors
++# SPDX-License-Identifier: Apache-2.0
++
++description: |
++  Cadence system watchdog timer (SWDT) of the Xilinx Zynq-7000 processing
++  system (UG585 chapter 8). The compatible string matches the Linux
++  devicetree binding.
++
++compatible: "cdns,wdt-r1p2"
++
++include: base.yaml
++
++properties:
++  reg:
++    required: true
++
++  interrupts:
++    required: true
++
++  clock-frequency:
++    type: int
++    required: true
++    description: |
++      Frequency in Hz of the clock that drives the watchdog counter. After
++      reset the SWDT runs from CPU_1x (the CPU clock divided by 6 in the
++      6:2:1 configuration, 108333333 Hz for a 650 MHz CPU clock).
+diff --git a/soc/xlnx/zynq7000/common/soc.c b/soc/xlnx/zynq7000/common/soc.c
+index 53233b2603a..244318d9048 100644
+--- a/soc/xlnx/zynq7000/common/soc.c
++++ b/soc/xlnx/zynq7000/common/soc.c
+@@ -57,6 +57,12 @@ static const struct arm_mmu_region mmu_regions[] = {
+ 			      0xF8F00000,
+ 			      0x2000,
+ 			      MT_STRONGLY_ORDERED | MPERM_R | MPERM_W),
++#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(watchdog0))
++	MMU_REGION_FLAT_ENTRY("watchdog0",
++			      DT_REG_ADDR(DT_NODELABEL(watchdog0)),
++			      0x1000,
++			      MT_STRONGLY_ORDERED | MPERM_R | MPERM_W),
++#endif
+ 	MMU_REGION_FLAT_ENTRY("ocm",
+ 			      DT_REG_ADDR(DT_CHOSEN(zephyr_ocm)),
+ 			      DT_REG_SIZE(DT_CHOSEN(zephyr_ocm)),

@@ -27,6 +27,10 @@
 	status = "disabled";
 };
 
+&watchdog0 {
+	status = "disabled";
+};
+
 &gem0 {
 	status = "disabled";
 };

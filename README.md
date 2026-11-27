@@ -36,7 +36,9 @@ Verified on hardware:
   driver that programs the PL from Zephyr through PCAP DMA (`0003`, see
   [`docs/adr/0001-zynq7000-devcfg-fpga-manager.md`](docs/adr/0001-zynq7000-devcfg-fpga-manager.md)),
   and a Zynq-7000 XADC sensor driver for die temperature and supply rails
-  (`0004`, see [`docs/adr/0002-zynq7000-xadc-sensor.md`](docs/adr/0002-zynq7000-xadc-sensor.md)).
+  (`0004`, see [`docs/adr/0002-zynq7000-xadc-sensor.md`](docs/adr/0002-zynq7000-xadc-sensor.md)),
+  and a Cadence PS watchdog driver for the Zynq-7000 SWDT (`0005`, see
+  [`docs/adr/0003-cadence-ps-watchdog.md`](docs/adr/0003-cadence-ps-watchdog.md)).
 
 > **Scope note:** This repository does not synthesize an FPGA bitstream or
 > `BOOT.BIN`. Instead, it reuses the verified `BOOT.BIN` (FSBL + U-Boot) from
@@ -154,6 +156,22 @@ VCCAUX    1.799560 V
 Applications use `sensor_sample_fetch()` / `sensor_channel_get()` with
 `SENSOR_CHAN_DIE_TEMP` and the `SENSOR_CHAN_XADC_*` channels from
 `<zephyr/drivers/sensor/zynq7000_xadc.h>`.
+
+## Hardware watchdog (Cadence PS SWDT)
+
+The watchdog driver is enabled for the standalone `pynq_z1` build (it is
+disabled in the AMP build, where Linux owns the SWDT). Applications use the
+standard `wdt_install_timeout()`, `wdt_setup()` and `wdt_feed()` calls with
+`WDT_FLAG_RESET_SOC` (reset the PS on expiry) or `WDT_FLAG_RESET_NONE` (callback
+from the interrupt). The stock `samples/drivers/watchdog` builds for this board.
+Shell test commands:
+
+```
+uart:~$ wdt run 2000 60      # feed a 2 s watchdog for 60 s, no reset
+uart:~$ wdt start 5000       # arm a 5 s watchdog
+uart:~$ wdt hang             # stop feeding; the board resets after ~5 s
+uart:~$ wdt cause            # SLCR REBOOT_STATUS (bit 16 = SWDT reset)
+```
 
 ## Building AMP / OpenAMP (PYNQ Linux on CPU0 + Zephyr on CPU1)
 

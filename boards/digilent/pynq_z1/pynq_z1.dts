@@ -13,6 +13,10 @@
 	#address-cells = <1>;
 	#size-cells = <1>;
 
+	aliases {
+		watchdog0 = &watchdog0;
+	};
+
 	chosen {
 		zephyr,sram = &sram0;
 		zephyr,console = &uart0;
@@ -65,6 +69,12 @@
 };
 
 &xadc {
+	status = "okay";
+};
+
+&watchdog0 {
+	/* SWDT runs from CPU_1x = 650 MHz / 6 */
+	clock-frequency = <108333333>;
 	status = "okay";
 };
 
