@@ -27,6 +27,9 @@ BOARD_GW="${BOARD_GW:-}"
 BOARD_MAC="${BOARD_MAC:-02:50:59:4e:51:01}"
 TFTP_PREFIX="${TFTP_PREFIX:-pynq1}"
 TFTP_DIR="${TFTP_DIR:-/srv/tftp/${TFTP_PREFIX}}"
+# Optional PL bitstream (byte-swapped .bin, file name under TFTP_PREFIX) preloaded to DDR
+PL_BITSTREAM="${PL_BITSTREAM:-}"
+PL_BITSTREAM_ADDR="${PL_BITSTREAM_ADDR:-0x05000000}"
 
 usage() {
 	cat <<EOF
@@ -49,6 +52,9 @@ Environment overrides (can also be placed in git-ignored local.conf):
   BOARD_MAC              Locally administered MAC for U-Boot (default: 02:50:59:4e:51:01)
   TFTP_PREFIX            Subdirectory under TFTP root (default: pynq1)
   TFTP_DIR               Local staging dir (default: /srv/tftp/\$TFTP_PREFIX)
+  PL_BITSTREAM           Optional byte-swapped .bin name under TFTP_PREFIX (e.g. base.bin); netboot.scr
+                         preloads it to PL_BITSTREAM_ADDR (default: 0x05000000) and prints the
+                         'pl load <addr> <size>' command to run in the Zephyr shell
 EOF
 }
 
@@ -273,6 +279,15 @@ cp "$BUILD_DIR/zephyr/zephyr.bin" "$SD_DIR/zephyr.bin"
 if [[ -n "$TFTP_SERVER_IP" ]]; then
 	cat <<EOF >"$TOOLS_DIR/netboot.cmd"
 echo "=== TFTP Netboot: Zephyr RTOS on PYNQ-Z1 ==="
+EOF
+	if [[ -n "$PL_BITSTREAM" ]]; then
+		cat <<EOF >>"$TOOLS_DIR/netboot.cmd"
+if tftpboot ${PL_BITSTREAM_ADDR} ${TFTP_PREFIX}/${PL_BITSTREAM}; then
+	echo "PL bitstream preloaded, in Zephyr run: pl load ${PL_BITSTREAM_ADDR} 0x\${filesize}"
+fi
+EOF
+	fi
+	cat <<EOF >>"$TOOLS_DIR/netboot.cmd"
 if tftpboot ${LOAD_ADDR} ${TFTP_PREFIX}/zephyr.bin; then
 	dcache off
 	icache off

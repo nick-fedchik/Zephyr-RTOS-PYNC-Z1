@@ -32,7 +32,9 @@ Verified on hardware:
   GICv1/v2 inter-core SGI drop bug in `isr_wrapper.S` (upstream `#122600` /
   `PR #123040`, documented in
   [`docs/zephyr-gic-v1-v2-sgi-bug.md`](docs/zephyr-gic-v1-v2-sgi-bug.md)) and
-  Zynq-7000 SMP/AMP SoC support.
+  Zynq-7000 SMP/AMP SoC support (`0002`) and a Zynq-7000 DevCfg FPGA Manager
+  driver that programs the PL from Zephyr through PCAP DMA (`0003`, see
+  [`docs/adr/0001-zynq7000-devcfg-fpga-manager.md`](docs/adr/0001-zynq7000-devcfg-fpga-manager.md)).
 
 > **Scope note:** This repository does not synthesize an FPGA bitstream or
 > `BOOT.BIN`. Instead, it reuses the verified `BOOT.BIN` (FSBL + U-Boot) from
@@ -51,7 +53,8 @@ Verified on hardware:
   C `/dev/rpmsg0` client (`rpmsg-cli.c`), `S90zephyr-amp` autostart init script,
   and `build_buildroot.sh`
 - `patches/` — patches auto-applied to `zephyr-ws/zephyr` by `setup_and_build.sh`
-- `docs/` — technical memos (including `docs/zephyr-gic-v1-v2-sgi-bug.md`)
+- `docs/` — technical memos (including `docs/zephyr-gic-v1-v2-sgi-bug.md`) and
+  architecture decision records (`docs/adr/`)
 - `setup_and_build.sh` — self-contained local workspace, SDK `1.0.1`, build,
   and boot-script staging
 - `ROADMAP.md` — project milestones and verification status
@@ -109,6 +112,30 @@ placed in a git-ignored `local.conf` file in the repository root.
    ELF `ENTRY_ADDR` via `go` (`bootm` / `uImage` is not needed).
 4. In the Zephyr shell (`uart:~$`), try `smp info`, `smp test`, `net iface`, or
    `zperf tcp download 5001`.
+
+## Loading the FPGA bitstream from Zephyr (DevCfg / PCAP)
+
+Zephyr can program the PL itself with the generic `fpga` API. The driver
+accepts a raw, byte-swapped `.bin` bitstream (starts with `66 55 99 aa`) that
+is already in DDR. For netboot, let U-Boot preload it over TFTP (the file must
+be in `TFTP_DIR/TFTP_PREFIX`; lab settings stay in `local.conf`):
+
+```sh
+PL_BITSTREAM=base.bin ./setup_and_build.sh   # optional: PL_BITSTREAM_ADDR=0x05000000
+```
+
+After `SRST`, U-Boot prints the exact command to run in the Zephyr shell:
+
+```
+uart:~$ pl status                           # INACTIVE
+uart:~$ pl load 0x05000000 4045564          # programs the PL in ~50 ms
+uart:~$ pl status                           # ACTIVE (PL DONE)
+uart:~$ pl led 5                            # LD0-LD3 via PL AXI GPIO
+```
+
+`fpga load devcfg@f8007000 <addr> <size>`, `fpga get_status` and `fpga reset`
+work as well. The staging window (`CONFIG_ZYNQ7000_FPGA_STAGING_ADDR/SIZE`) is
+MMU-mapped by the SoC code; use addresses inside it.
 
 ## Building AMP / OpenAMP (PYNQ Linux on CPU0 + Zephyr on CPU1)
 
