@@ -1,6 +1,6 @@
-# Zephyr RTOS на FPGA-платі PYNQ-Z1
+# Zephyr RTOS на FPGA-платі PYNQ-Z1 (повна технічна версія)
 
-*Запуск Zephyr RTOS 4.5.0 на процесорній частині (PS) Zynq-7000 без встановлення Vivado: консоль UART0, out-of-tree порт плати, Ethernet, TFTP netboot і експериментальний 2-ядерний SMP. Робота з програмованою логікою FPGA (PL) — у подальших планах.*
+*Повна інженерна документація до [статті на DOU](https://dou.ua/forums/topic/63691/): запуск Zephyr RTOS 4.5.0 на процесорній частині (PS) Zynq-7000 без встановлення Vivado, карта регістрів, out-of-tree HWMv2 порт плати, Ethernet, двоступеневий TFTP netboot, асемблерний патч GICv1/v2 (`#122600`) та експериментальний 2-ядерний SMP.*
 
 Плати на базі **Xilinx (AMD) Zynq-7000** дуже популярні серед інженерів: такі SoC ставлять у свої рішення багато виробників — від Digilent (PYNQ-Z1, Zybo, Arty Z7) та Avnet (ZedBoard, MicroZed) до ALINX та інших. Причина проста: в одному чипі поєднано повноцінний двоядерний процесор **ARM Cortex-A9** (частина **PS** — *Processing System*) і матрицю програмованої логіки **FPGA** (частина **PL** — *Programmable Logic*).
 
@@ -24,6 +24,20 @@
 - у репозиторії `Xilinx/PYNQ` лежать Vivado Tcl-скрипти дизайну, а не готовий `ps7_init_gpl.c`.
 
 Тому я пішов найпростішим робочим шляхом: зробив бекап розділу microSD і використав офіційний `BOOT.BIN` з образу **PYNQ v3.1**. Він уже коректно ініціалізує DDR3, `UART0` на MIO 14/15 та гігабітний Ethernet `gem0` у режимі `rgmii-id`.
+
+### Ключові фізичні адреси PS Zynq-7000 на PYNQ-Z1
+
+| Фізична адреса | Блок / регістр | Призначення в проєкті |
+|---|---|---|
+| `0x00000000 – 0x000fffff` | Нижній 1 МБ DDR3 | Таблиця векторів ARM (`0x0`), стек/буфери U-Boot |
+| `0x00100000 – 0x1fffffff` | DDR3 (`sram0`, 511 МБ) | Виконувана пам’ять Zephyr (`LOAD_ADDR = 0x00100000`) |
+| `0xE0000000` | `uart0` (`xuartps`) | USB-UART консоль (`MIO14/15`, 100 МГц, 115200 8N1) |
+| `0xE000B000` | `gem0` (`cdns,gem`) | 1G Ethernet MAC + MDIO (`phyaddr 0`, `rgmii-id`) |
+| `0xF8000000` | `SLCR` | Системні регістри тактування, pinmux та скиду |
+| `0xF8F00000` | `SCU` | Snoop Control Unit (когерентність L1 між CPU0/CPU1) |
+| `0xF8F00200` | `GTC` (`arch_timer`) | 64-бітний Cortex-A9 Global Timer (`325 МГц` standalone) |
+| `0xF8F01000` / `0xF8F01F00` | `GICD` / `GICD_SGIR` | GICv1 Distributor і генерація між’ядерних SGI (`0..15`) |
+| `0xFFFFFFF0` | `OCM` wake vector | Адреса старту CPU1 після виходу з BootROM `WFE` (`sev`) |
 
 ```mermaid
 flowchart LR
@@ -114,6 +128,39 @@ Hello from Zephyr on PYNQ-Z1
 west build -p always -b pynq_z1 . -d build -- -DBOARD_ROOT=.
 ```
 
+Ключові вузли `boards/digilent/pynq_z1/pynq_z1.dts`:
+
+```dts
+/ {
+    chosen {
+        zephyr,sram = &sram0;
+        zephyr,console = &uart0;
+        zephyr,shell-uart = &uart0;
+    };
+    sram0: memory@100000 {
+        compatible = "mmio-sram";
+        reg = <0x00100000 DT_SIZE_M(511)>;
+    };
+};
+
+&arch_timer { clock-frequency = <325000000>; };
+
+&uart0 {
+    current-speed = <115200>;
+    clock-frequency = <100000000>;
+    pinctrl-0 = <&pinctrl_uart0_default>;
+    pinctrl-names = "default";
+    status = "okay";
+};
+
+&gem0 {
+    phy-handle = <&gem0_phy>;
+    clock-frequency = <1000000000>;
+    local-mac-address = [9e 5c 1a 8a bf 53];
+    status = "okay";
+};
+```
+
 ---
 
 ## 5. Гігабітний Ethernet, DHCPv4 і тест через `zperf`
@@ -165,6 +212,23 @@ $$R_{\max} \approx \frac{W}{\text{RTT}} = \frac{16 \times 1024 \times 8\text{ б
 1. **`boot.scr` (записується на microSD один раз):** задає `ethaddr`, статичні `ipaddr`/`serverip`, короткий таймаут (3 с) і завантажує `pynq1/netboot.scr` на адресу `0x03100000` (щоб не затерти себе в `0x03000000`). Якщо TFTP-сервер вимкнений, скрипт автоматично відкочується на `zephyr.bin` із SD-карти.
 2. **`netboot.scr` (оновлюється автоматично на кожному `./setup_and_build.sh`):** завжди містить актуальні `LOAD_ADDR` та `ENTRY_ADDR` свіжої збірки, завантажує `pynq1/zephyr.bin` по TFTP і запускає його.
 
+Критичний момент перед командою `go`: U-Boot працює з увімкненим D-cache/I-cache, тоді як стартап Zephyr (`__start`) очікує чистий стан до ініціалізації MMU, тому `dcache off; icache off` перед `go` обов’язковий:
+
+```sh
+# Скрипт boot.cmd (компілюється через: mkimage -A arm -T script -C none -d boot.cmd boot.scr)
+setenv ethaddr 9e:5c:1a:8a:bf:53
+setenv ipaddr 192.168.0.11
+setenv serverip 192.168.0.10
+setenv tftptimeout 3000
+if tftpboot 0x03100000 pynq1/netboot.scr; then
+    source 0x03100000
+fi
+# Fallback на microSD, якщо TFTP недоступний
+fatload mmc 0:1 0x00100000 zephyr.bin
+dcache off; icache off
+go 0x0010FA8C
+```
+
 Тепер весь цикл перевірки нової прошивки звівся до `./setup_and_build.sh` і натискання кнопки **`SRST`** на платі:
 
 ```text
@@ -208,7 +272,20 @@ CPU1 SGI#7 reply: 123^2 = 15129 (seq=2, sgi_irqs=2, rtt=7 us)
 
 Під час цього експерименту та наступної спроби ввімкнути SMP я зіткнувся з двома проблемами у Zephyr 4.5.0 (`41d10b597304`):
 
-1. **Підтверджений баг у релізі `4.5.0` — втрата між’ядерних SGI у GICv1/v2 (`arch/arm/core/cortex_a_r/isr_wrapper.S`).** Коли CPU1 шле переривання SGI #7 на CPU0, апаратний регістр `GICC_IAR` повертає номер ядра-відправника (`CPUID=1`) у бітах `[12:10]`, тобто `0x407` (`1031`). У `isr_wrapper.S` (в обох гілках — із `CONFIG_USE_SWITCH` і без нього) це значення без маскування порівнювалося з `CONFIG_NUM_IRQS` (`96`), і переривання тихо відкидалося як spurious — хоча в `arch/arm64/core/isr_wrapper.S:71-73` маска `bic x0, x0, #0x1c00` уже є. Одна інструкція `ubfx r0, r0, #0, #10` після `push {r0, r1}` (щоб зберегти повний `IAR` на стеку для `arm_gic_eoi`) одразу оживила SGI #7 із затримкою **7 мкс** із режиму `WFE`. Перевірка upstream показала, що цей самий баг уже зафіксовано в [issue #122600](https://github.com/zephyrproject-rtos/zephyr/issues/122600) і виправлено на гілці `main` після `4.5.0` у [PR #123040](https://github.com/zephyrproject-rtos/zephyr/pull/123040) (маскою `bic r0, r0, #0x1c00`), але для релізної збірки `4.5.0` локальний патч усе ще потрібен. Повний розбір із мінімальним відтворенням лежить у [`docs/zephyr-gic-v1-v2-sgi-bug.md`](https://github.com/nick-fedchik/Zephyr-RTOS-PYNC-Z1/blob/main/docs/zephyr-gic-v1-v2-sgi-bug.md) та `patches/0001-...patch`.
+1. **Підтверджений баг у релізі `4.5.0` — втрата між’ядерних SGI у GICv1/v2 (`arch/arm/core/cortex_a_r/isr_wrapper.S`).** Коли CPU1 шле переривання SGI #7 на CPU0, апаратний регістр `GICC_IAR` повертає номер ядра-відправника (`CPUID=1`) у бітах `[12:10]`, тобто `0x407` (`1031`). У `isr_wrapper.S` (в обох гілках — із `CONFIG_USE_SWITCH` і без нього) це значення без маскування порівнювалося з `CONFIG_NUM_IRQS` (`96`), і переривання тихо відкидалося як spurious — хоча в `arch/arm64/core/isr_wrapper.S:71-73` маска `bic x0, x0, #0x1c00` уже є. Одна інструкція `ubfx r0, r0, #0, #10` після `push {r0, r1}` (щоб зберегти повний `IAR` на стеку для `arm_gic_eoi`) одразу оживила SGI #7 із затримкою **7 мкс** із режиму `WFE`:
+
+```diff
+--- a/arch/arm/core/cortex_a_r/isr_wrapper.S
++++ b/arch/arm/core/cortex_a_r/isr_wrapper.S
+@@ -183,6 +183,10 @@ _idle_state_cleared:
+ 	push {r0, r1}
++#if defined(CONFIG_GIC_V1) || defined(CONFIG_GIC_V2)
++	/* Keep full CPUID|INTID on stack for arm_gic_eoi(), mask r0 to 10-bit INTID */
++	ubfx r0, r0, #0, #10
++#endif
+```
+
+   Перевірка upstream показала, що цей самий баг уже зафіксовано в [issue #122600](https://github.com/zephyrproject-rtos/zephyr/issues/122600) і виправлено на гілці `main` після `4.5.0` у [PR #123040](https://github.com/zephyrproject-rtos/zephyr/pull/123040) (маскою `bic r0, r0, #0x1c00`), але для релізної збірки `4.5.0` локальний патч усе ще потрібен. Повний розбір із мінімальним відтворенням лежить у [`docs/zephyr-gic-v1-v2-sgi-bug.md`](https://github.com/nick-fedchik/Zephyr-RTOS-PYNC-Z1/blob/main/docs/zephyr-gic-v1-v2-sgi-bug.md) та `patches/0001-...patch`.
 2. **Конфлікт конфігурації `CONFIG_USE_SWITCH=y` + `CONFIG_FPU_SHARING=y` (`thread.c:160` vs `exc.S:256`).** При ввімкненні `CONFIG_SMP=y` (який вимагає `CONFIG_USE_SWITCH=y`) функція `arch_new_thread()` кладе знизу стеку 232 байти нулів `struct __fpu_sf`, але `z_arm_cortex_ar_exit_exc` їх не знімає — і перший перехід у `main` стрибає на `pc=0x0`. Наразі я обійшов цей конфлікт вимкненням `CONFIG_FPU=n` (повноцінне виправлення FPU-фрейму для `CONFIG_USE_SWITCH` потребує окремої перевірки).
 
 ### Експериментальний прототип: 2-ядерний SMP на Zynq-7000
@@ -268,6 +345,8 @@ Total wall time (parallel): 11574 us
 
 ## Посилання
 
+- Популярна версія статті на DOU: [dou.ua/forums/topic/63691/](https://dou.ua/forums/topic/63691/)
+- Частина 2 (повна технічна версія AMP/OpenAMP, Mainline Linux 7.3.6 `PREEMPT_RT`, Buildroot): [Zephyr-RTOS-on-PYNQ-Z1-AMP-OpenAMP-Part2-UA.md](Zephyr-RTOS-on-PYNQ-Z1-AMP-OpenAMP-Part2-UA.md)
 - Репозиторій проєкту (out-of-tree порт `boards/digilent/pynq_z1/`, `setup_and_build.sh`, патчі `patches/`, `ROADMAP.md`): [github.com/nick-fedchik/Zephyr-RTOS-PYNC-Z1](https://github.com/nick-fedchik/Zephyr-RTOS-PYNC-Z1)
 - Детальне технічне мемо по знайденому багу GICv1/v2 SGI у Zephyr 4.5.0: [docs/zephyr-gic-v1-v2-sgi-bug.md](https://github.com/nick-fedchik/Zephyr-RTOS-PYNC-Z1/blob/main/docs/zephyr-gic-v1-v2-sgi-bug.md)
 - Upstream Zephyr issue та фікс на `main`: [#122600](https://github.com/zephyrproject-rtos/zephyr/issues/122600), [PR #123040](https://github.com/zephyrproject-rtos/zephyr/pull/123040)
