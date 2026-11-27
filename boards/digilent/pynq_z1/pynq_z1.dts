@@ -78,6 +78,39 @@
 	status = "okay";
 };
 
+&qspi {
+	/* LQSPI reference clock: IO PLL 1000 MHz / 5, programmed by the boot firmware */
+	clock-frequency = <200000000>;
+	status = "okay";
+
+	qspi_flash: flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <50000000>;
+		jedec-id = [ef 70 18]; /* Winbond W25Q128JV-IM */
+		size = <DT_SIZE_M(128)>; /* bits: 16 MiB */
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			/* Untouched: whatever the board shipped or was provisioned with */
+			qspi_data: partition@0 {
+				label = "qspi-data";
+				reg = <0x00000000 DT_SIZE_M(15)>;
+				read-only;
+			};
+
+			/* The only region the tests may erase or program */
+			qspi_scratch: partition@f00000 {
+				label = "qspi-scratch";
+				reg = <0x00f00000 DT_SIZE_M(1)>;
+			};
+		};
+	};
+};
+
 &psgpio {
 	status = "okay";
 };

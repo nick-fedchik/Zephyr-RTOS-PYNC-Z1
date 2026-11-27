@@ -31,6 +31,10 @@
 	status = "disabled";
 };
 
+&qspi {
+	status = "disabled";
+};
+
 &gem0 {
 	status = "disabled";
 };

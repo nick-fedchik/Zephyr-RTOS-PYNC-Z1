@@ -1,0 +1,448 @@
+diff --git a/drivers/spi/CMakeLists.txt b/drivers/spi/CMakeLists.txt
+index ab0825627ab..4138062e2d2 100644
+--- a/drivers/spi/CMakeLists.txt
++++ b/drivers/spi/CMakeLists.txt
+@@ -90,6 +90,7 @@ zephyr_library_sources_ifdef(CONFIG_SPI_WCH spi_wch.c)
+ zephyr_library_sources_ifdef(CONFIG_SPI_XEC_QMSPI spi_xec_qmspi.c)
+ zephyr_library_sources_ifdef(CONFIG_SPI_XEC_QMSPI_LDMA spi_xec_qmspi_ldma.c)
+ zephyr_library_sources_ifdef(CONFIG_SPI_XLNX_AXI_QUADSPI spi_xlnx_axi_quadspi.c)
++zephyr_library_sources_ifdef(CONFIG_SPI_XLNX_ZYNQ_QSPI spi_xlnx_zynq_qspi.c)
+ zephyr_library_sources_ifdef(CONFIG_SPI_XLNX_ZYNQMP_GQSPI spi_xlnx_zynqmp_gqspi.c)
+ zephyr_library_sources_ifdef(CONFIG_SPI_XMC4XXX spi_xmc4xxx.c)
+ # zephyr-keep-sorted-stop
+diff --git a/drivers/spi/Kconfig b/drivers/spi/Kconfig
+index 4a83a167941..3f2f485d239 100644
+--- a/drivers/spi/Kconfig
++++ b/drivers/spi/Kconfig
+@@ -185,6 +185,7 @@ source "drivers/spi/Kconfig.virtio"
+ source "drivers/spi/Kconfig.wch"
+ source "drivers/spi/Kconfig.xec_qmspi"
+ source "drivers/spi/Kconfig.xlnx"
++source "drivers/spi/Kconfig.xlnx_zynq_qspi"
+ source "drivers/spi/Kconfig.xlnx_zynqmp_gqspi"
+ source "drivers/spi/Kconfig.xmc4xxx"
+ source "drivers/spi/spi_nxp_lpspi/Kconfig"
+diff --git a/drivers/spi/Kconfig.xlnx_zynq_qspi b/drivers/spi/Kconfig.xlnx_zynq_qspi
+new file mode 100644
+index 00000000000..82a887f800a
+--- /dev/null
++++ b/drivers/spi/Kconfig.xlnx_zynq_qspi
+@@ -0,0 +1,11 @@
++# Copyright (c) 2026
++# SPDX-License-Identifier: Apache-2.0
++
++config SPI_XLNX_ZYNQ_QSPI
++	bool "Xilinx Zynq-7000 PS QSPI controller driver"
++	default y
++	depends on DT_HAS_XLNX_ZYNQ_QSPI_1_0_ENABLED
++	help
++	  Enable the Zynq-7000 PS Quad-SPI controller driver. It uses the
++	  polled, single-lane I/O mode and is meant to drive the QSPI NOR
++	  flash through the generic jedec,spi-nor driver.
+diff --git a/drivers/spi/spi_xlnx_zynq_qspi.c b/drivers/spi/spi_xlnx_zynq_qspi.c
+new file mode 100644
+index 00000000000..51a9df5b615
+--- /dev/null
++++ b/drivers/spi/spi_xlnx_zynq_qspi.c
+@@ -0,0 +1,340 @@
++/*
++ * Xilinx Zynq-7000 PS Quad-SPI controller (I/O mode, polled)
++ *
++ * Register-level reference: UG585 chapter 12 and the mainline Linux
++ * drivers/spi/spi-zynq-qspi.c. Only the single-lane I/O transfer mode is
++ * implemented: the Linear Addressing mode used by the boot ROM is disabled
++ * and the wire protocol stays 1-1-1, so the flash is driven by the generic
++ * "jedec,spi-nor" driver on top of the Zephyr SPI API.
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#define DT_DRV_COMPAT xlnx_zynq_qspi_1_0
++
++#include <zephyr/kernel.h>
++#include <zephyr/drivers/spi.h>
++#include <zephyr/sys/device_mmio.h>
++#include <zephyr/sys/sys_io.h>
++#include <zephyr/sys/util.h>
++
++#include <zephyr/logging/log.h>
++LOG_MODULE_REGISTER(spi_zynq_qspi, CONFIG_SPI_LOG_LEVEL);
++
++#include "spi_context.h"
++
++/* Register offsets */
++#define QSPI_CONFIG       0x00
++#define QSPI_STATUS       0x04
++#define QSPI_IDIS         0x0C
++#define QSPI_ENABLE       0x14
++#define QSPI_TXD_4B       0x1C
++#define QSPI_RXD          0x20
++#define QSPI_TX_THRESH    0x28
++#define QSPI_RX_THRESH    0x2C
++#define QSPI_TXD_1B       0x80
++#define QSPI_TXD_2B       0x84
++#define QSPI_TXD_3B       0x88
++#define QSPI_LINEAR_CFG   0xA0
++
++/* QSPI_CONFIG */
++#define CONFIG_IFMODE     BIT(31) /* Flash memory interface mode */
++#define CONFIG_MANSTRT    BIT(16)
++#define CONFIG_MANSTRTEN  BIT(15) /* Manual start enable */
++#define CONFIG_SSFORCE    BIT(14) /* Manual chip select */
++#define CONFIG_PCS        BIT(10) /* Chip select 0 (1 = deasserted) */
++#define CONFIG_FWIDTH     GENMASK(7, 6)
++#define CONFIG_BDRATE     GENMASK(5, 3)
++#define CONFIG_CPHA       BIT(2)
++#define CONFIG_CPOL       BIT(1)
++#define CONFIG_MSTREN     BIT(0)
++
++#define BAUD_DIV_SHIFT    3
++#define BAUD_DIV_MAX      7 /* divide by 2 << 7 = 256 */
++
++/* QSPI_STATUS / QSPI_IDIS bits (identical layout) */
++#define IXR_RX_OVERFLOW   BIT(0)
++#define IXR_TXNFULL       BIT(2)
++#define IXR_TXFULL        BIT(3)
++#define IXR_RXNEMPTY      BIT(4)
++#define IXR_RXFULL        BIT(5)
++#define IXR_TX_UNDERFLOW  BIT(6)
++#define IXR_ALL           GENMASK(6, 0)
++
++#define QSPI_FIFO_WORDS   63
++/* Words pushed in one burst, kept well below the FIFO depth */
++#define QSPI_BURST_WORDS  32
++#define QSPI_XFER_TIMEOUT_US 100000
++
++struct zynq_qspi_config {
++	DEVICE_MMIO_ROM;
++	uint32_t ref_clock;
++};
++
++struct zynq_qspi_data {
++	DEVICE_MMIO_RAM;
++	struct spi_context ctx;
++};
++
++#define QSPI_REG(dev, off) (DEVICE_MMIO_GET(dev) + (off))
++
++static void zynq_qspi_cs(const struct device *dev, bool assert_cs)
++{
++	mm_reg_t cfg_reg = QSPI_REG(dev, QSPI_CONFIG);
++	uint32_t cfg = sys_read32(cfg_reg);
++
++	if (assert_cs) {
++		cfg &= ~CONFIG_PCS;
++	} else {
++		cfg |= CONFIG_PCS;
++	}
++	sys_write32(cfg, cfg_reg);
++}
++
++static int zynq_qspi_configure(const struct device *dev, const struct spi_config *spi_cfg)
++{
++	const struct zynq_qspi_config *cfg = dev->config;
++	struct zynq_qspi_data *data = dev->data;
++	uint32_t reg;
++	unsigned int div = 0;
++
++	if (spi_context_configured(&data->ctx, spi_cfg)) {
++		return 0;
++	}
++
++	if (spi_cfg->operation & SPI_OP_MODE_PERIPHERAL) {
++		LOG_ERR("Peripheral mode is not supported");
++		return -ENOTSUP;
++	}
++	if (spi_cfg->operation & (SPI_MODE_LOOP | SPI_TRANSFER_LSB | SPI_CS_ACTIVE_HIGH)) {
++		LOG_ERR("Unsupported operation 0x%x", (unsigned int)spi_cfg->operation);
++		return -ENOTSUP;
++	}
++	if ((spi_cfg->operation & SPI_LINES_MASK) != SPI_LINES_SINGLE) {
++		LOG_ERR("Only single-line transfers are supported");
++		return -ENOTSUP;
++	}
++	if (SPI_WORD_SIZE_GET(spi_cfg->operation) != 8) {
++		LOG_ERR("Only 8-bit words are supported");
++		return -ENOTSUP;
++	}
++	if (spi_cs_is_gpio(spi_cfg) || spi_cfg->peripheral != 0) {
++		LOG_ERR("Only the native chip select 0 is supported");
++		return -ENOTSUP;
++	}
++
++	/* Smallest divider (2, 4 ... 256) not exceeding the requested rate */
++	while (div < BAUD_DIV_MAX && spi_cfg->frequency != 0 &&
++	       (cfg->ref_clock / (2U << div)) > spi_cfg->frequency) {
++		div++;
++	}
++
++	reg = sys_read32(QSPI_REG(dev, QSPI_CONFIG));
++	reg &= ~(CONFIG_CPHA | CONFIG_CPOL | CONFIG_BDRATE);
++	if (spi_cfg->operation & SPI_MODE_CPHA) {
++		reg |= CONFIG_CPHA;
++	}
++	if (spi_cfg->operation & SPI_MODE_CPOL) {
++		reg |= CONFIG_CPOL;
++	}
++	reg |= div << BAUD_DIV_SHIFT;
++	sys_write32(reg, QSPI_REG(dev, QSPI_CONFIG));
++
++	data->ctx.config = spi_cfg;
++
++	return 0;
++}
++
++/* Pack up to 4 bytes from the TX buffers into a FIFO word (first byte in the LSB) */
++static uint32_t zynq_qspi_pull_tx(struct spi_context *ctx, unsigned int n)
++{
++	uint32_t word = 0;
++
++	for (unsigned int i = 0; i < n; i++) {
++		if (spi_context_tx_buf_on(ctx)) {
++			word |= (uint32_t)*ctx->tx_buf << (8 * i);
++		}
++		spi_context_update_tx(ctx, 1, 1);
++	}
++
++	return word;
++}
++
++static void zynq_qspi_push_rx(struct spi_context *ctx, uint32_t word, unsigned int n)
++{
++	for (unsigned int i = 0; i < n; i++) {
++		if (spi_context_rx_buf_on(ctx)) {
++			*ctx->rx_buf = (word >> (8 * i)) & 0xff;
++		}
++		spi_context_update_rx(ctx, 1, 1);
++	}
++}
++
++static int zynq_qspi_rx_word(const struct device *dev, uint32_t *word)
++{
++	if (!WAIT_FOR(sys_read32(QSPI_REG(dev, QSPI_STATUS)) & IXR_RXNEMPTY,
++		      QSPI_XFER_TIMEOUT_US, k_busy_wait(1))) {
++		return -ETIMEDOUT;
++	}
++	*word = sys_read32(QSPI_REG(dev, QSPI_RXD));
++
++	return 0;
++}
++
++static int zynq_qspi_run(const struct device *dev)
++{
++	struct zynq_qspi_data *data = dev->data;
++	struct spi_context *ctx = &data->ctx;
++	size_t remaining = MAX(spi_context_total_tx_len(ctx), spi_context_total_rx_len(ctx));
++	uint32_t word;
++	int ret;
++
++	while (remaining > 0) {
++		if (remaining >= 4) {
++			size_t words = MIN(remaining / 4, QSPI_BURST_WORDS);
++
++			for (size_t i = 0; i < words; i++) {
++				sys_write32(zynq_qspi_pull_tx(ctx, 4), QSPI_REG(dev, QSPI_TXD_4B));
++			}
++			for (size_t i = 0; i < words; i++) {
++				ret = zynq_qspi_rx_word(dev, &word);
++				if (ret != 0) {
++					return ret;
++				}
++				zynq_qspi_push_rx(ctx, word, 4);
++			}
++			remaining -= words * 4;
++		} else {
++			/* The 1..3 byte TX registers must only be used with an empty FIFO */
++			static const uint16_t txd_off[] = {QSPI_TXD_1B, QSPI_TXD_2B, QSPI_TXD_3B};
++			size_t n = remaining;
++
++			sys_write32(zynq_qspi_pull_tx(ctx, n), QSPI_REG(dev, txd_off[n - 1]));
++			ret = zynq_qspi_rx_word(dev, &word);
++			if (ret != 0) {
++				return ret;
++			}
++			/* Received bytes of a short transfer sit in the upper part of the word */
++			zynq_qspi_push_rx(ctx, word >> (8 * (4 - n)), n);
++			remaining = 0;
++		}
++	}
++
++	return 0;
++}
++
++static void zynq_qspi_flush(const struct device *dev)
++{
++	/* Drain stale RX words, then clear sticky status */
++	for (unsigned int i = 0; i < QSPI_FIFO_WORDS + 1 &&
++	     (sys_read32(QSPI_REG(dev, QSPI_STATUS)) & IXR_RXNEMPTY); i++) {
++		(void)sys_read32(QSPI_REG(dev, QSPI_RXD));
++	}
++	sys_write32(IXR_ALL, QSPI_REG(dev, QSPI_STATUS));
++}
++
++static int zynq_qspi_transceive(const struct device *dev, const struct spi_config *spi_cfg,
++				const struct spi_buf_set *tx_bufs,
++				const struct spi_buf_set *rx_bufs)
++{
++	struct zynq_qspi_data *data = dev->data;
++	struct spi_context *ctx = &data->ctx;
++	int ret;
++
++	spi_context_lock(ctx, false, NULL, NULL, spi_cfg);
++
++	ret = zynq_qspi_configure(dev, spi_cfg);
++	if (ret != 0) {
++		goto out;
++	}
++
++	spi_context_buffers_setup(ctx, tx_bufs, rx_bufs, 1);
++	zynq_qspi_flush(dev);
++
++	zynq_qspi_cs(dev, true);
++	ret = zynq_qspi_run(dev);
++	if (!(spi_cfg->operation & SPI_HOLD_ON_CS) || ret != 0) {
++		zynq_qspi_cs(dev, false);
++	}
++	if (ret != 0) {
++		LOG_ERR("Transfer failed (%d), status 0x%08x", ret,
++			sys_read32(QSPI_REG(dev, QSPI_STATUS)));
++		zynq_qspi_flush(dev);
++	}
++
++out:
++	spi_context_release(ctx, ret);
++
++	return ret;
++}
++
++static int zynq_qspi_transceive_sync(const struct device *dev, const struct spi_config *spi_cfg,
++				     const struct spi_buf_set *tx_bufs,
++				     const struct spi_buf_set *rx_bufs)
++{
++	return zynq_qspi_transceive(dev, spi_cfg, tx_bufs, rx_bufs);
++}
++
++static int zynq_qspi_release(const struct device *dev, const struct spi_config *spi_cfg)
++{
++	struct zynq_qspi_data *data = dev->data;
++
++	zynq_qspi_cs(dev, false);
++	spi_context_unlock_unconditionally(&data->ctx);
++
++	return 0;
++}
++
++static int zynq_qspi_init(const struct device *dev)
++{
++	struct zynq_qspi_data *data = dev->data;
++	uint32_t cfg;
++
++	DEVICE_MMIO_MAP(dev, K_MEM_CACHE_NONE);
++
++	sys_write32(0, QSPI_REG(dev, QSPI_ENABLE));
++	sys_write32(IXR_ALL, QSPI_REG(dev, QSPI_IDIS));
++	/* The boot ROM / U-Boot may have left the Linear Addressing mode on */
++	sys_write32(0, QSPI_REG(dev, QSPI_LINEAR_CFG));
++	zynq_qspi_flush(dev);
++
++	cfg = sys_read32(QSPI_REG(dev, QSPI_CONFIG));
++	cfg &= ~(CONFIG_MSTREN | CONFIG_CPOL | CONFIG_CPHA | CONFIG_BDRATE | CONFIG_SSFORCE |
++		 CONFIG_MANSTRTEN | CONFIG_MANSTRT);
++	/* Manual chip select (deasserted), auto start, 32-bit FIFO width, flash interface */
++	cfg |= CONFIG_MSTREN | CONFIG_SSFORCE | CONFIG_FWIDTH | CONFIG_IFMODE | CONFIG_PCS;
++	sys_write32(cfg, QSPI_REG(dev, QSPI_CONFIG));
++
++	/* RX not-empty status must assert on the first word, TX threshold = empty */
++	sys_write32(1, QSPI_REG(dev, QSPI_RX_THRESH));
++	sys_write32(1, QSPI_REG(dev, QSPI_TX_THRESH));
++
++	sys_write32(1, QSPI_REG(dev, QSPI_ENABLE));
++
++	spi_context_unlock_unconditionally(&data->ctx);
++
++	return 0;
++}
++
++static DEVICE_API(spi, zynq_qspi_api) = {
++	.transceive = zynq_qspi_transceive_sync,
++	.release = zynq_qspi_release,
++#ifdef CONFIG_SPI_RTIO
++	.iodev_submit = spi_rtio_iodev_default_submit,
++#endif
++};
++
++#define ZYNQ_QSPI_INIT(n)                                                                          \
++	static struct zynq_qspi_data zynq_qspi_data_##n = {                                        \
++		SPI_CONTEXT_INIT_LOCK(zynq_qspi_data_##n, ctx),                                    \
++		SPI_CONTEXT_INIT_SYNC(zynq_qspi_data_##n, ctx),                                    \
++	};                                                                                         \
++	static const struct zynq_qspi_config zynq_qspi_config_##n = {                              \
++		DEVICE_MMIO_ROM_INIT(DT_DRV_INST(n)),                                              \
++		.ref_clock = DT_INST_PROP(n, clock_frequency),                                     \
++	};                                                                                         \
++	SPI_DEVICE_DT_INST_DEFINE(n, zynq_qspi_init, NULL, &zynq_qspi_data_##n,                    \
++				  &zynq_qspi_config_##n, POST_KERNEL, CONFIG_SPI_INIT_PRIORITY,    \
++				  &zynq_qspi_api);
++
++DT_INST_FOREACH_STATUS_OKAY(ZYNQ_QSPI_INIT)
+diff --git a/dts/arm/xilinx/zynq7000.dtsi b/dts/arm/xilinx/zynq7000.dtsi
+index 00fb5404a46..cce3f439bec 100644
+--- a/dts/arm/xilinx/zynq7000.dtsi
++++ b/dts/arm/xilinx/zynq7000.dtsi
+@@ -188,6 +188,15 @@
+ 			tx-fifo-depth = <128>;
+ 		};
+ 
++		qspi: spi@e000d000 {
++			compatible = "xlnx,zynq-qspi-1.0";
++			reg = <0xe000d000 0x1000>;
++			interrupts = <GIC_SPI 19 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
++			#address-cells = <1>;
++			#size-cells = <0>;
++			status = "disabled";
++		};
++
+ 		psgpio: gpio@e000a000 {
+ 			compatible = "xlnx,ps-gpio";
+ 			status = "disabled";
+diff --git a/dts/bindings/spi/xlnx,zynq-qspi-1.0.yaml b/dts/bindings/spi/xlnx,zynq-qspi-1.0.yaml
+new file mode 100644
+index 00000000000..be37ef209c5
+--- /dev/null
++++ b/dts/bindings/spi/xlnx,zynq-qspi-1.0.yaml
+@@ -0,0 +1,18 @@
++# SPDX-License-Identifier: Apache-2.0
++
++description: Xilinx Zynq-7000 PS Quad-SPI controller (I/O mode)
++
++compatible: "xlnx,zynq-qspi-1.0"
++
++include: [spi-controller.yaml]
++
++properties:
++  reg:
++    required: true
++
++  clock-frequency:
++    required: true
++    description: |
++      Frequency in Hz of the LQSPI reference clock (SLCR LQSPI_CLK_CTRL),
++      as left by the boot firmware. The SPI clock is this value divided by
++      2, 4 ... 256.
+diff --git a/soc/xlnx/zynq7000/common/soc.c b/soc/xlnx/zynq7000/common/soc.c
+index 244318d9048..0b06a5b2cdf 100644
+--- a/soc/xlnx/zynq7000/common/soc.c
++++ b/soc/xlnx/zynq7000/common/soc.c
+@@ -31,6 +31,12 @@
+ 
+ static const struct arm_mmu_region mmu_regions[] = {
+ 
++#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(qspi))
++	MMU_REGION_FLAT_ENTRY("qspi",
++			      DT_REG_ADDR(DT_NODELABEL(qspi)),
++			      0x1000,
++			      MT_STRONGLY_ORDERED | MPERM_R | MPERM_W),
++#endif
+ 	MMU_REGION_FLAT_ENTRY("vectors",
+ 			      0x00000000,
+ 			      0x1000,

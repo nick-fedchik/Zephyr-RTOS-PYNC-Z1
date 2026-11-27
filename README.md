@@ -38,7 +38,10 @@ Verified on hardware:
   and a Zynq-7000 XADC sensor driver for die temperature and supply rails
   (`0004`, see [`docs/adr/0002-zynq7000-xadc-sensor.md`](docs/adr/0002-zynq7000-xadc-sensor.md)),
   and a Cadence PS watchdog driver for the Zynq-7000 SWDT (`0005`, see
-  [`docs/adr/0003-cadence-ps-watchdog.md`](docs/adr/0003-cadence-ps-watchdog.md)).
+  [`docs/adr/0003-cadence-ps-watchdog.md`](docs/adr/0003-cadence-ps-watchdog.md)),
+  and a Zynq-7000 PS QSPI controller driver that exposes the on-board NOR flash
+  through the standard `flash` API (`0006`, see
+  [`docs/adr/0004-zynq7000-qspi-nor-flash.md`](docs/adr/0004-zynq7000-qspi-nor-flash.md)).
 
 > **Scope note:** This repository does not synthesize an FPGA bitstream or
 > `BOOT.BIN`. Instead, it reuses the verified `BOOT.BIN` (FSBL + U-Boot) from
@@ -172,6 +175,26 @@ uart:~$ wdt start 5000       # arm a 5 s watchdog
 uart:~$ wdt hang             # stop feeding; the board resets after ~5 s
 uart:~$ wdt cause            # SLCR REBOOT_STATUS (bit 16 = SWDT reset)
 ```
+
+## QSPI NOR flash
+
+The standalone `pynq_z1` build drives the on-board 16 MiB Winbond `W25Q128JV`
+through the Zynq-7000 PS QSPI controller (polled, single-lane I/O mode) and the
+generic `jedec,spi-nor` driver, so the standard `flash` shell commands work. The
+flash holds a boot image, so the board devicetree splits it into a read-only
+`qspi-data` partition (first 15 MiB) and a 1 MiB `qspi-scratch` partition at
+`0xF00000`: erase and write only inside the scratch partition.
+
+```
+uart:~$ qspi id                       # JEDEC ID, geometry, scratch partition
+uart:~$ qspi selftest 128             # erase/program/verify 128 KiB of scratch
+uart:~$ flash partitions
+uart:~$ flash read qspi_flash 0xf00000 40
+uart:~$ flash write qspi_flash 0xf00000 0x11223344
+uart:~$ flash erase qspi_flash 0xf00000 0x10000
+```
+
+The QSPI node is disabled in the AMP build.
 
 ## Building AMP / OpenAMP (PYNQ Linux on CPU0 + Zephyr on CPU1)
 
