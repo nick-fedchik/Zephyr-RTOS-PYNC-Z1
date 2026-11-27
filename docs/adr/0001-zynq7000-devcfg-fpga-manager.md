@@ -1,6 +1,6 @@
 # ADR 0001: Zynq-7000 DevCfg FPGA Manager driver (`fpga_zynq7000`)
 
-- **Status:** Accepted (implemented, verified on hardware; see "Open items")
+- **Status:** Accepted (implemented, verified on hardware including visual LED confirmation; see "Open items")
 - **Issue:** [#2 `[P1][Easy]` Zynq-7000 DevCfg FPGA Manager](https://github.com/nick-fedchik/Zephyr-RTOS-PYNC-Z1/issues/2)
 - **Zephyr version:** `v4.5.0`
 - **Platform:** Digilent PYNQ-Z1 (Xilinx Zynq-7000 `XC7Z020`, dual Cortex-A9)
@@ -180,6 +180,7 @@ hit an unconfigured AXI window, which hangs the bus). `prj.conf` enables
 | `pl load 0x05000000 4045564` | PL programmed in ~51 ms (50976, 50067, 50984 us), `fpga_get_status()=1` |
 | `pl status` after load | `ACTIVE (PL DONE)` |
 | LED GPIO `0x41250000` (`pl led 3/5/6/10/0xf`) | DATA write and read-back match, `TRI=0xf` |
+| `pl led 0xf` | LD0-LD3 physically lit (visual confirmation by the project owner) |
 | `pl read 0x41200000` / `0x41250000` | No AXI bus hang |
 | Reload without reset, `fpga reset`, then `pl load` | Works; status returns to `INACTIVE` after reset |
 | `fpga load devcfg@f8007000 0x05000000 4045564` / `fpga get_status` | Works, status `1` |
@@ -189,7 +190,6 @@ hit an unconfigured AXI window, which hangs the bus). `prj.conf` enables
 
 ## Open items / follow-ups
 
-- Visual confirmation of the `DONE` LED and `LD0-LD3` (register read-back passed).
 - Interrupt-driven mode (D2).
 - Partial reconfiguration and encrypted bitstreams.
 - Behaviour when the PL was already configured by U-Boot/Linux before Zephyr.
