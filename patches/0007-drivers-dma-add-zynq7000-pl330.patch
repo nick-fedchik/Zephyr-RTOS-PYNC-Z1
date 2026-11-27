@@ -1,0 +1,887 @@
+diff --git a/drivers/dma/CMakeLists.txt b/drivers/dma/CMakeLists.txt
+index 06bc265714d..73b3ecf6d63 100644
+--- a/drivers/dma/CMakeLists.txt
++++ b/drivers/dma/CMakeLists.txt
+@@ -74,6 +74,7 @@ zephyr_library_sources_ifdef(CONFIG_DMA_TI_MSPM0 dma_ti_mspm0.c)
+ zephyr_library_sources_ifdef(CONFIG_DMA_WCH dma_wch.c)
+ zephyr_library_sources_ifdef(CONFIG_DMA_XILINX_ADMA dma_xilinx_adma.c)
+ zephyr_library_sources_ifdef(CONFIG_DMA_XILINX_AXI_DMA dma_xilinx_axi_dma.c)
++zephyr_library_sources_ifdef(CONFIG_DMA_XLNX_ZYNQ_PL330 dma_xlnx_zynq_pl330.c)
+ zephyr_library_sources_ifdef(CONFIG_DMA_XMC4XXX dma_xmc4xxx.c)
+ zephyr_library_sources_ifdef(CONFIG_MCUX_PXP dma_mcux_pxp.c)
+ # zephyr-keep-sorted-stop
+diff --git a/drivers/dma/Kconfig b/drivers/dma/Kconfig
+index 94f16c2dbd3..cc2d9260d8e 100644
+--- a/drivers/dma/Kconfig
++++ b/drivers/dma/Kconfig
+@@ -78,6 +78,7 @@ source "drivers/dma/Kconfig.wch"
+ source "drivers/dma/Kconfig.xec"
+ source "drivers/dma/Kconfig.xilinx_adma"
+ source "drivers/dma/Kconfig.xilinx_axi_dma"
++source "drivers/dma/Kconfig.xlnx_zynq_pl330"
+ source "drivers/dma/Kconfig.xmc4xxx"
+ # zephyr-keep-sorted-stop
+ 
+diff --git a/drivers/dma/Kconfig.xlnx_zynq_pl330 b/drivers/dma/Kconfig.xlnx_zynq_pl330
+new file mode 100644
+index 00000000000..23d05d4847d
+--- /dev/null
++++ b/drivers/dma/Kconfig.xlnx_zynq_pl330
+@@ -0,0 +1,12 @@
++# Copyright (c) 2026
++# SPDX-License-Identifier: Apache-2.0
++
++config DMA_XLNX_ZYNQ_PL330
++	bool "Xilinx Zynq-7000 PS DMA controller (PL330) driver"
++	default y
++	depends on DT_HAS_XLNX_ZYNQ_DMA_PL330_ENABLED
++	select CACHE_MANAGEMENT
++	help
++	  Enable the Zynq-7000 PS DMAC (ARM PrimeCell PL330) driver. It supports
++	  interrupt-driven memory-to-memory transfers, with optional chained
++	  blocks, and maintains the CPU data cache around every transfer.
+diff --git a/drivers/dma/dma_xlnx_zynq_pl330.c b/drivers/dma/dma_xlnx_zynq_pl330.c
+new file mode 100644
+index 00000000000..a7f66040c7e
+--- /dev/null
++++ b/drivers/dma/dma_xlnx_zynq_pl330.c
+@@ -0,0 +1,775 @@
++/*
++ * Copyright (c) 2026
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Xilinx Zynq-7000 PS DMA controller: ARM PrimeCell PL330 (DMAC), UG585 ch. 9.
++ *
++ * Memory-to-memory driver: every transfer is a small DMAC microcode program
++ * (DMAMOV/DMALD/DMAST/DMALP/DMASEV/DMAEND) built per channel in dma_config()
++ * and started through the debug instruction interface (DMAGO). Completion is
++ * signalled by DMASEV, which raises the per-channel event interrupt. The CPU
++ * data cache is maintained by the driver, because the DMAC bypasses it.
++ *
++ * Register-level reference: Linux drivers/dma/pl330.c.
++ */
++
++#define DT_DRV_COMPAT xlnx_zynq_dma_pl330
++
++#include <errno.h>
++#include <zephyr/cache.h>
++#include <zephyr/device.h>
++#include <zephyr/devicetree.h>
++#include <zephyr/drivers/dma.h>
++#include <zephyr/irq.h>
++#include <zephyr/kernel.h>
++#include <zephyr/logging/log.h>
++#include <zephyr/spinlock.h>
++#include <zephyr/sys/barrier.h>
++#include <zephyr/sys/util.h>
++
++LOG_MODULE_REGISTER(dma_xlnx_zynq_pl330, CONFIG_DMA_LOG_LEVEL);
++
++/* DMAC register offsets */
++#define DMAC_DS        0x000
++#define DMAC_DS_DNS    BIT(9)
++#define DMAC_INTEN     0x020
++#define DMAC_INTMIS    0x028
++#define DMAC_INTCLR    0x02c
++#define DMAC_FSRD      0x030
++#define DMAC_FSRC      0x034
++#define DMAC_FTRD      0x038
++#define DMAC_FTR(n)    (0x040 + (n) * 4)
++#define DMAC_CS(n)     (0x100 + (n) * 8)
++#define DMAC_SA(n)     (0x400 + (n) * 0x20)
++#define DMAC_DA(n)     (0x404 + (n) * 0x20)
++#define DMAC_DBGSTATUS 0xd00
++#define DMAC_DBGCMD    0xd04
++#define DMAC_DBGINST0  0xd08
++#define DMAC_DBGINST1  0xd0c
++#define DMAC_CR0       0xe00
++#define DMAC_CRD       0xe14
++#define DMAC_PERIPH_ID 0xfe0
++
++#define DBGSTATUS_BUSY BIT(0)
++#define CS_STATE_MASK  0xf
++#define CS_STATE_STOP  0x0
++
++#define PERIPH_ID_PL330 0x41330 /* part 0x330, designer ARM */
++#define PERIPH_ID_MASK  0xfffff
++#define PERIPH_REV_SHIFT 20
++#define PERIPH_REV_MASK  0xf
++#define PERIPH_REV_R1P0  1 /* lock-up free, no RMB/WMB needed between LD and ST */
++
++#define CR0_NUM_CHANS_SHIFT  4
++#define CR0_NUM_CHANS_MASK   0x7
++#define CR0_NUM_EVENTS_SHIFT 17
++#define CR0_NUM_EVENTS_MASK  0x1f
++#define CRD_DATA_WIDTH_MASK  0x7
++#define CRD_DATA_BUFF_SHIFT  20
++#define CRD_DATA_BUFF_MASK   0x3ff
++
++/* DMAC microcode opcodes */
++#define OP_DMAEND   0x00
++#define OP_DMAKILL  0x01
++#define OP_DMALD    0x04
++#define OP_DMAST    0x08
++#define OP_DMARMB   0x12
++#define OP_DMAWMB   0x13
++#define OP_DMALP    0x20
++#define OP_DMALPEND 0x28
++#define OP_DMASEV   0x34
++#define OP_DMAGO    0xa0
++#define OP_DMAMOV   0xbc
++
++#define MOV_SAR 0
++#define MOV_CCR 1
++#define MOV_DAR 2
++
++/* Channel control register fields */
++#define CC_SRCINC        BIT(0)
++#define CC_SRCNS         BIT(9)
++#define CC_DSTINC        BIT(14)
++#define CC_DSTNS         BIT(23)
++#define CC_SRCBRSTSIZE_S 1
++#define CC_SRCBRSTLEN_S  4
++#define CC_DSTBRSTSIZE_S 15
++#define CC_DSTBRSTLEN_S  18
++
++#define PL330_MAX_CHAN    8
++#define PL330_MAX_BURST   16
++#define PL330_MAX_BLOCKS  4
++#define PL330_MCODE_SIZE  512 /* per channel, multiple of the cache line size */
++#define PL330_LOOP_MAX    256
++#define PL330_WAIT_US     1000
++
++struct pl330_blk {
++	uint32_t src;
++	uint32_t dst;
++	uint32_t len;
++	bool src_inc;
++	bool dst_inc;
++	uint8_t max_log2; /* widest beat allowed when an address is fixed (peripheral-style) */
++};
++
++struct pl330_chan {
++	uint8_t mcode[PL330_MCODE_SIZE];
++	struct pl330_blk blk[PL330_MAX_BLOCKS];
++	dma_callback_t cb;
++	void *user_data;
++	uint64_t total_copied;
++	uint32_t total_len;
++	uint8_t nblk;
++	bool configured;
++	bool busy;
++	bool err_cb_dis;
++} __aligned(CONFIG_DCACHE_LINE_SIZE);
++
++struct dma_zynq_pl330_config {
++	DEVICE_MMIO_ROM;
++	void (*irq_config)(void);
++	uint32_t num_chan;
++};
++
++struct dma_zynq_pl330_data {
++	DEVICE_MMIO_RAM;
++	struct k_spinlock lock;
++	uint32_t bus_bytes_log2;
++	uint32_t buf_depth;
++	uint32_t num_chan;
++	uint32_t num_events;
++	uint32_t rev;
++	bool ns;
++	struct pl330_chan chan[PL330_MAX_CHAN];
++} __aligned(CONFIG_DCACHE_LINE_SIZE);
++
++static inline uint32_t dmac_rd(const struct device *dev, uint32_t off)
++{
++	return sys_read32(DEVICE_MMIO_GET(dev) + off);
++}
++
++static inline void dmac_wr(const struct device *dev, uint32_t off, uint32_t val)
++{
++	sys_write32(val, DEVICE_MMIO_GET(dev) + off);
++}
++
++/* Microcode emitter. The write cursor keeps counting past the end so overflow is detectable. */
++struct mc {
++	uint8_t *p;
++	uint32_t off;
++};
++
++static void mc_byte(struct mc *m, uint8_t v)
++{
++	if (m->off < PL330_MCODE_SIZE) {
++		m->p[m->off] = v;
++	}
++	m->off++;
++}
++
++static void mc_mov(struct mc *m, uint8_t reg, uint32_t val)
++{
++	mc_byte(m, OP_DMAMOV);
++	mc_byte(m, reg);
++	mc_byte(m, val);
++	mc_byte(m, val >> 8);
++	mc_byte(m, val >> 16);
++	mc_byte(m, val >> 24);
++}
++
++static void mc_lp(struct mc *m, unsigned int lc, uint32_t count)
++{
++	mc_byte(m, OP_DMALP | (lc << 1));
++	mc_byte(m, count - 1);
++}
++
++static void mc_lpend(struct mc *m, unsigned int lc, uint32_t bjump)
++{
++	/* bit 4: loop with a counter (not "forever") */
++	mc_byte(m, OP_DMALPEND | BIT(4) | (lc << 2));
++	mc_byte(m, bjump);
++}
++
++static void mc_body(struct mc *m, bool barriers)
++{
++	mc_byte(m, OP_DMALD);
++	if (barriers) {
++		mc_byte(m, OP_DMARMB);
++	}
++	mc_byte(m, OP_DMAST);
++	if (barriers) {
++		mc_byte(m, OP_DMAWMB);
++	}
++}
++
++/* Emit "n" load/store pairs using up to two nested hardware loops */
++static void mc_bursts(struct mc *m, uint32_t n, bool barriers)
++{
++	while (n) {
++		if (n == 1) {
++			mc_body(m, barriers);
++			return;
++		}
++
++		if (n <= PL330_LOOP_MAX) {
++			mc_lp(m, 1, n);
++			uint32_t start = m->off;
++
++			mc_body(m, barriers);
++			mc_lpend(m, 1, m->off - start);
++			return;
++		}
++
++		uint32_t outer = MIN(n / PL330_LOOP_MAX, PL330_LOOP_MAX);
++
++		mc_lp(m, 0, outer);
++		uint32_t start0 = m->off;
++
++		mc_lp(m, 1, PL330_LOOP_MAX);
++		uint32_t start1 = m->off;
++
++		mc_body(m, barriers);
++		mc_lpend(m, 1, m->off - start1);
++		mc_lpend(m, 0, m->off - start0);
++		n -= outer * PL330_LOOP_MAX;
++	}
++}
++
++static uint32_t make_ccr(const struct pl330_blk *b, uint32_t size_log2, uint32_t blen, bool ns)
++{
++	uint32_t ccr = 0;
++
++	if (b->src_inc) {
++		ccr |= CC_SRCINC;
++	}
++	if (b->dst_inc) {
++		ccr |= CC_DSTINC;
++	}
++	if (ns) {
++		ccr |= CC_SRCNS | CC_DSTNS;
++	}
++	ccr |= (size_log2 << CC_SRCBRSTSIZE_S) | (size_log2 << CC_DSTBRSTSIZE_S);
++	ccr |= ((blen - 1) << CC_SRCBRSTLEN_S) | ((blen - 1) << CC_DSTBRSTLEN_S);
++
++	return ccr;
++}
++
++static void mc_block(struct mc *m, const struct dma_zynq_pl330_data *d, const struct pl330_blk *b)
++{
++	bool barriers = d->rev < PERIPH_REV_R1P0;
++	uint32_t log2 = MIN(d->bus_bytes_log2, b->max_log2);
++
++	/* Widest beat that both addresses are aligned to */
++	while ((b->src | b->dst) & (BIT(log2) - 1)) {
++		log2--;
++	}
++
++	uint32_t beat = BIT(log2);
++	uint32_t blen = ((BIT(d->bus_bytes_log2) * (d->buf_depth / d->num_chan)) >> log2);
++
++	blen = CLAMP(blen, 1, PL330_MAX_BURST);
++	if (!b->src_inc || !b->dst_inc) {
++		/* Multi-beat FIXED AXI bursts do not work against DDR, use single beats */
++		blen = 1;
++	}
++
++	uint32_t burst_bytes = beat * blen;
++	uint32_t nbursts = b->len / burst_bytes;
++	uint32_t rem = b->len % burst_bytes;
++	uint32_t nbeats = rem / beat;
++	uint32_t nbytes = rem % beat;
++
++	mc_mov(m, MOV_SAR, b->src);
++	mc_mov(m, MOV_DAR, b->dst);
++
++	if (nbursts) {
++		mc_mov(m, MOV_CCR, make_ccr(b, log2, blen, d->ns));
++		mc_bursts(m, nbursts, barriers);
++	}
++	if (nbeats) {
++		mc_mov(m, MOV_CCR, make_ccr(b, log2, 1, d->ns));
++		mc_bursts(m, nbeats, barriers);
++	}
++	if (nbytes) {
++		mc_mov(m, MOV_CCR, make_ccr(b, 0, 1, d->ns));
++		mc_bursts(m, nbytes, barriers);
++	}
++}
++
++static int build_mcode(const struct dma_zynq_pl330_data *d, struct pl330_chan *c, uint32_t ch)
++{
++	struct mc m = {.p = c->mcode, .off = 0};
++
++	for (uint32_t i = 0; i < c->nblk; i++) {
++		mc_block(&m, d, &c->blk[i]);
++	}
++
++	/* Make sure the last write reached memory before the event fires */
++	mc_byte(&m, OP_DMAWMB);
++	mc_byte(&m, OP_DMASEV);
++	mc_byte(&m, ch << 3);
++	mc_byte(&m, OP_DMAEND);
++
++	if (m.off > PL330_MCODE_SIZE) {
++		return -ENOMEM;
++	}
++
++	/* The DMAC fetches the program from memory, bypassing the CPU data cache */
++	sys_cache_data_flush_range(c->mcode, PL330_MCODE_SIZE);
++
++	return 0;
++}
++
++/* Debug instruction interface, caller holds the lock. */
++static int dmac_dbg_exec(const struct device *dev, uint32_t inst0, uint32_t inst1)
++{
++	if (!WAIT_FOR(!(dmac_rd(dev, DMAC_DBGSTATUS) & DBGSTATUS_BUSY), PL330_WAIT_US,
++		      k_busy_wait(1))) {
++		return -ETIMEDOUT;
++	}
++
++	dmac_wr(dev, DMAC_DBGINST0, inst0);
++	dmac_wr(dev, DMAC_DBGINST1, inst1);
++	dmac_wr(dev, DMAC_DBGCMD, 0);
++
++	return 0;
++}
++
++static int dmac_go(const struct device *dev, uint32_t ch, uint32_t addr, bool ns)
++{
++	uint32_t inst0 = ((OP_DMAGO | (ns ? BIT(1) : 0)) << 16) | (ch << 24);
++
++	return dmac_dbg_exec(dev, inst0, addr);
++}
++
++static int dmac_kill(const struct device *dev, uint32_t ch)
++{
++	/* DMAKILL executed on the channel thread (bit 0), channel number in bits 15:8 */
++	return dmac_dbg_exec(dev, (OP_DMAKILL << 16) | (ch << 8) | BIT(0), 0);
++}
++
++static void dmac_inten_update(const struct device *dev, uint32_t set, uint32_t clr)
++{
++	dmac_wr(dev, DMAC_INTEN, (dmac_rd(dev, DMAC_INTEN) | set) & ~clr);
++}
++
++static void chan_cache_prepare(const struct dma_zynq_pl330_data *d, const struct pl330_chan *c)
++{
++	size_t beat = BIT(d->bus_bytes_log2);
++
++	for (uint32_t i = 0; i < c->nblk; i++) {
++		const struct pl330_blk *b = &c->blk[i];
++
++		sys_cache_data_flush_range((void *)b->src, b->src_inc ? b->len : beat);
++		/* Write back and drop dirty lines so they cannot overwrite the DMA data later */
++		sys_cache_data_flush_and_invd_range((void *)b->dst, b->dst_inc ? b->len : beat);
++	}
++}
++
++static void chan_cache_finish(const struct dma_zynq_pl330_data *d, const struct pl330_chan *c)
++{
++	size_t beat = BIT(d->bus_bytes_log2);
++
++	for (uint32_t i = 0; i < c->nblk; i++) {
++		const struct pl330_blk *b = &c->blk[i];
++
++		sys_cache_data_invd_range((void *)b->dst, b->dst_inc ? b->len : beat);
++	}
++}
++
++/* Mark a channel idle and call back. Must not be called with the lock held. */
++static void chan_complete(const struct device *dev, uint32_t ch, int status)
++{
++	struct dma_zynq_pl330_data *d = dev->data;
++	struct pl330_chan *c = &d->chan[ch];
++	dma_callback_t cb;
++	void *user_data;
++	k_spinlock_key_t key = k_spin_lock(&d->lock);
++
++	if (!c->busy) {
++		k_spin_unlock(&d->lock, key);
++		return;
++	}
++	dmac_inten_update(dev, 0, BIT(ch));
++	k_spin_unlock(&d->lock, key);
++
++	chan_cache_finish(d, c);
++
++	key = k_spin_lock(&d->lock);
++	if (status == 0) {
++		c->total_copied += c->total_len;
++	}
++	cb = c->cb;
++	user_data = c->user_data;
++	c->busy = false;
++	k_spin_unlock(&d->lock, key);
++
++	if (cb != NULL && (status == 0 || !c->err_cb_dis)) {
++		cb(dev, user_data, ch, status);
++	}
++}
++
++static void dma_zynq_pl330_isr(const struct device *dev)
++{
++	struct dma_zynq_pl330_data *d = dev->data;
++	uint32_t mask = BIT_MASK(d->num_chan);
++	uint32_t fsrc = dmac_rd(dev, DMAC_FSRC) & mask;
++	uint32_t ints = dmac_rd(dev, DMAC_INTMIS) & mask;
++
++	if (dmac_rd(dev, DMAC_FSRD) & BIT(0)) {
++		LOG_ERR("DMA manager fault, FTRD 0x%08x", dmac_rd(dev, DMAC_FTRD));
++	}
++
++	for (uint32_t ch = 0; ch < d->num_chan; ch++) {
++		if (fsrc & BIT(ch)) {
++			LOG_ERR("channel %u fault, FTR 0x%08x", ch, dmac_rd(dev, DMAC_FTR(ch)));
++			k_spinlock_key_t key = k_spin_lock(&d->lock);
++
++			(void)dmac_kill(dev, ch);
++			k_spin_unlock(&d->lock, key);
++			chan_complete(dev, ch, -EIO);
++		}
++	}
++
++	for (uint32_t ch = 0; ch < d->num_chan; ch++) {
++		if (ints & BIT(ch)) {
++			dmac_wr(dev, DMAC_INTCLR, BIT(ch));
++			chan_complete(dev, ch, 0);
++		}
++	}
++}
++
++static int dma_zynq_pl330_config(const struct device *dev, uint32_t channel,
++				 struct dma_config *cfg)
++{
++	struct dma_zynq_pl330_data *d = dev->data;
++	const struct dma_zynq_pl330_config *dc = dev->config;
++	struct pl330_chan *c;
++	struct dma_block_config *b = cfg->head_block;
++	k_spinlock_key_t key;
++	uint32_t n = 0;
++	uint32_t total = 0;
++	int ret;
++
++	if (channel >= dc->num_chan) {
++		return -EINVAL;
++	}
++	if (cfg->channel_direction != MEMORY_TO_MEMORY) {
++		return -ENOTSUP;
++	}
++	if (cfg->block_count == 0 || cfg->block_count > PL330_MAX_BLOCKS || b == NULL ||
++	    cfg->cyclic || cfg->source_handshake || cfg->dest_handshake) {
++		return -EINVAL;
++	}
++
++	c = &d->chan[channel];
++
++	key = k_spin_lock(&d->lock);
++	if (c->busy) {
++		k_spin_unlock(&d->lock, key);
++		return -EBUSY;
++	}
++	c->configured = false;
++	k_spin_unlock(&d->lock, key);
++
++	for (; b != NULL && n < cfg->block_count; b = b->next_block, n++) {
++		if (b->block_size == 0 || b->source_gather_en || b->dest_scatter_en ||
++		    b->source_reload_en || b->dest_reload_en) {
++			return -ENOTSUP;
++		}
++		if ((b->source_addr_adj != DMA_ADDR_ADJ_INCREMENT &&
++		     b->source_addr_adj != DMA_ADDR_ADJ_NO_CHANGE) ||
++		    (b->dest_addr_adj != DMA_ADDR_ADJ_INCREMENT &&
++		     b->dest_addr_adj != DMA_ADDR_ADJ_NO_CHANGE)) {
++			return -ENOTSUP;
++		}
++
++		uint32_t max_log2 = d->bus_bytes_log2;
++
++		/* A fixed address is accessed with the width the caller asked for */
++		for (int side = 0; side < 2; side++) {
++			bool fixed = side ? b->dest_addr_adj == DMA_ADDR_ADJ_NO_CHANGE
++					  : b->source_addr_adj == DMA_ADDR_ADJ_NO_CHANGE;
++			uint32_t size = side ? cfg->dest_data_size : cfg->source_data_size;
++			uint32_t addr = side ? b->dest_address : b->source_address;
++
++			if (!fixed) {
++				continue;
++			}
++			if (size == 0 || !is_power_of_two(size) || size > BIT(d->bus_bytes_log2) ||
++			    (addr & (size - 1)) || (b->block_size & (size - 1))) {
++				return -EINVAL;
++			}
++			max_log2 = MIN(max_log2, find_lsb_set(size) - 1);
++		}
++
++		c->blk[n].max_log2 = max_log2;
++		c->blk[n].src = b->source_address;
++		c->blk[n].dst = b->dest_address;
++		c->blk[n].len = b->block_size;
++		c->blk[n].src_inc = b->source_addr_adj == DMA_ADDR_ADJ_INCREMENT;
++		c->blk[n].dst_inc = b->dest_addr_adj == DMA_ADDR_ADJ_INCREMENT;
++		total += b->block_size;
++	}
++	if (n != cfg->block_count) {
++		return -EINVAL;
++	}
++
++	c->nblk = n;
++	c->total_len = total;
++	c->cb = cfg->dma_callback;
++	c->user_data = cfg->user_data;
++	c->err_cb_dis = cfg->error_callback_dis;
++
++	ret = build_mcode(d, c, channel);
++	if (ret < 0) {
++		LOG_ERR("channel %u: microcode does not fit (%u blocks)", channel, n);
++		return ret;
++	}
++
++	c->configured = true;
++
++	return 0;
++}
++
++static int dma_zynq_pl330_start(const struct device *dev, uint32_t channel)
++{
++	struct dma_zynq_pl330_data *d = dev->data;
++	const struct dma_zynq_pl330_config *dc = dev->config;
++	struct pl330_chan *c;
++	k_spinlock_key_t key;
++	int ret;
++
++	if (channel >= dc->num_chan) {
++		return -EINVAL;
++	}
++	c = &d->chan[channel];
++
++	key = k_spin_lock(&d->lock);
++	if (!c->configured) {
++		k_spin_unlock(&d->lock, key);
++		return -EINVAL;
++	}
++	if (c->busy) {
++		k_spin_unlock(&d->lock, key);
++		return -EBUSY;
++	}
++	c->busy = true;
++	k_spin_unlock(&d->lock, key);
++
++	chan_cache_prepare(d, c);
++
++	/* The thread may still be finishing its DMAEND after the previous event */
++	if (!WAIT_FOR((dmac_rd(dev, DMAC_CS(channel)) & CS_STATE_MASK) == CS_STATE_STOP,
++		      PL330_WAIT_US, k_busy_wait(1))) {
++		c->busy = false;
++		return -EBUSY;
++	}
++
++	barrier_dsync_fence_full();
++
++	key = k_spin_lock(&d->lock);
++	dmac_inten_update(dev, BIT(channel), 0);
++	ret = dmac_go(dev, channel, (uint32_t)(uintptr_t)c->mcode, d->ns);
++	if (ret < 0) {
++		dmac_inten_update(dev, 0, BIT(channel));
++		c->busy = false;
++	}
++	k_spin_unlock(&d->lock, key);
++
++	return ret;
++}
++
++static int dma_zynq_pl330_stop(const struct device *dev, uint32_t channel)
++{
++	struct dma_zynq_pl330_data *d = dev->data;
++	const struct dma_zynq_pl330_config *dc = dev->config;
++	struct pl330_chan *c;
++	k_spinlock_key_t key;
++	int ret = 0;
++
++	if (channel >= dc->num_chan) {
++		return -EINVAL;
++	}
++	c = &d->chan[channel];
++
++	key = k_spin_lock(&d->lock);
++	if (c->busy) {
++		ret = dmac_kill(dev, channel);
++		dmac_inten_update(dev, 0, BIT(channel));
++		dmac_wr(dev, DMAC_INTCLR, BIT(channel));
++	}
++	k_spin_unlock(&d->lock, key);
++	if (ret < 0) {
++		return ret;
++	}
++
++	if (!WAIT_FOR((dmac_rd(dev, DMAC_CS(channel)) & CS_STATE_MASK) == CS_STATE_STOP,
++		      PL330_WAIT_US, k_busy_wait(1))) {
++		return -ETIMEDOUT;
++	}
++
++	key = k_spin_lock(&d->lock);
++	if (c->busy) {
++		c->busy = false;
++		chan_cache_finish(d, c);
++	}
++	k_spin_unlock(&d->lock, key);
++
++	return 0;
++}
++
++static int dma_zynq_pl330_get_status(const struct device *dev, uint32_t channel,
++				     struct dma_status *stat)
++{
++	struct dma_zynq_pl330_data *d = dev->data;
++	const struct dma_zynq_pl330_config *dc = dev->config;
++	struct pl330_chan *c;
++	k_spinlock_key_t key;
++
++	if (channel >= dc->num_chan) {
++		return -EINVAL;
++	}
++	c = &d->chan[channel];
++
++	key = k_spin_lock(&d->lock);
++	stat->busy = c->busy;
++	stat->dir = MEMORY_TO_MEMORY;
++	stat->free = 0;
++	stat->write_position = 0;
++	stat->read_position = 0;
++	stat->total_copied = c->total_copied;
++	stat->pending_length = 0;
++
++	if (c->busy) {
++		uint32_t pending = c->total_len;
++
++		/* The address registers advance with the transfer: locate it in the block list */
++		for (uint32_t i = 0; i < c->nblk; i++) {
++			const struct pl330_blk *b = &c->blk[i];
++			bool use_src = b->src_inc;
++
++			if (!use_src && !b->dst_inc) {
++				continue;
++			}
++
++			uint32_t cur = dmac_rd(dev, use_src ? DMAC_SA(channel) : DMAC_DA(channel));
++			uint32_t start = use_src ? b->src : b->dst;
++
++			if (cur >= start && cur - start <= b->len) {
++				for (uint32_t j = 0; j < i; j++) {
++					pending -= c->blk[j].len;
++				}
++				pending -= cur - start;
++				break;
++			}
++		}
++		stat->pending_length = pending;
++	}
++	k_spin_unlock(&d->lock, key);
++
++	return 0;
++}
++
++static int dma_zynq_pl330_get_attribute(const struct device *dev, uint32_t type, uint32_t *value)
++{
++	ARG_UNUSED(dev);
++
++	switch (type) {
++	case DMA_ATTR_BUFFER_ADDRESS_ALIGNMENT:
++	case DMA_ATTR_BUFFER_SIZE_ALIGNMENT:
++	case DMA_ATTR_COPY_ALIGNMENT:
++		/* Any alignment works; cache lines should still be respected by the caller */
++		*value = 1;
++		return 0;
++	case DMA_ATTR_MAX_BLOCK_COUNT:
++		*value = PL330_MAX_BLOCKS;
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static int dma_zynq_pl330_init(const struct device *dev)
++{
++	const struct dma_zynq_pl330_config *dc = dev->config;
++	struct dma_zynq_pl330_data *d = dev->data;
++	uint32_t periph_id = 0;
++	uint32_t val;
++
++	DEVICE_MMIO_MAP(dev, K_MEM_CACHE_NONE);
++
++	for (int i = 0; i < 4; i++) {
++		periph_id |= (dmac_rd(dev, DMAC_PERIPH_ID + i * 4) & 0xff) << (8 * i);
++	}
++	if ((periph_id & PERIPH_ID_MASK) != PERIPH_ID_PL330) {
++		LOG_ERR("not a PL330 (periph id 0x%08x)", periph_id);
++		return -ENODEV;
++	}
++	d->rev = (periph_id >> PERIPH_REV_SHIFT) & PERIPH_REV_MASK;
++
++	val = dmac_rd(dev, DMAC_CRD);
++	d->bus_bytes_log2 = val & CRD_DATA_WIDTH_MASK;
++	d->buf_depth = ((val >> CRD_DATA_BUFF_SHIFT) & CRD_DATA_BUFF_MASK) + 1;
++
++	val = dmac_rd(dev, DMAC_CR0);
++	d->num_chan = ((val >> CR0_NUM_CHANS_SHIFT) & CR0_NUM_CHANS_MASK) + 1;
++	d->num_events = ((val >> CR0_NUM_EVENTS_SHIFT) & CR0_NUM_EVENTS_MASK) + 1;
++
++	if (d->num_chan < dc->num_chan) {
++		LOG_ERR("DT asks for %u channels, hardware has %u", dc->num_chan, d->num_chan);
++		return -EINVAL;
++	}
++	d->num_chan = dc->num_chan;
++	d->ns = !!(dmac_rd(dev, DMAC_DS) & DMAC_DS_DNS);
++
++	dmac_wr(dev, DMAC_INTEN, 0);
++	dmac_wr(dev, DMAC_INTCLR, BIT_MASK(d->num_events));
++
++	dc->irq_config();
++
++	LOG_INF("PL330 r%up%u: %u channels, %u events, %u-bit bus, %u-beat MFIFO, %s manager",
++		d->rev >> 1, d->rev & 1, d->num_chan, d->num_events, 8U << d->bus_bytes_log2,
++		d->buf_depth, d->ns ? "non-secure" : "secure");
++
++	return 0;
++}
++
++static DEVICE_API(dma, dma_zynq_pl330_api) = {
++	.config = dma_zynq_pl330_config,
++	.start = dma_zynq_pl330_start,
++	.stop = dma_zynq_pl330_stop,
++	.get_status = dma_zynq_pl330_get_status,
++	.get_attribute = dma_zynq_pl330_get_attribute,
++};
++
++#define PL330_IRQ_CONNECT(idx, inst)                                                              \
++	do {                                                                                       \
++		IRQ_CONNECT(DT_INST_IRQ_BY_IDX(inst, idx, irq),                                    \
++			    DT_INST_IRQ_BY_IDX(inst, idx, priority), dma_zynq_pl330_isr,           \
++			    DEVICE_DT_INST_GET(inst), DT_INST_IRQ_BY_IDX(inst, idx, flags));       \
++		irq_enable(DT_INST_IRQ_BY_IDX(inst, idx, irq));                                    \
++	} while (false);
++
++#define DMA_ZYNQ_PL330_INIT(inst)                                                                 \
++	static void dma_zynq_pl330_irq_config_##inst(void)                                         \
++	{                                                                                          \
++		LISTIFY(DT_NUM_IRQS(DT_DRV_INST(inst)), PL330_IRQ_CONNECT, (), inst)               \
++	}                                                                                          \
++                                                                                                   \
++	static const struct dma_zynq_pl330_config dma_zynq_pl330_config_##inst = {                 \
++		DEVICE_MMIO_ROM_INIT(DT_DRV_INST(inst)),                                           \
++		.irq_config = dma_zynq_pl330_irq_config_##inst,                                     \
++		.num_chan = DT_INST_PROP(inst, dma_channels),                                      \
++	};                                                                                         \
++                                                                                                   \
++	static struct dma_zynq_pl330_data dma_zynq_pl330_data_##inst;                              \
++                                                                                                   \
++	BUILD_ASSERT(DT_INST_PROP(inst, dma_channels) <= PL330_MAX_CHAN,                           \
++		     "at most 8 channels");                                                        \
++                                                                                                   \
++	DEVICE_DT_INST_DEFINE(inst, dma_zynq_pl330_init, NULL, &dma_zynq_pl330_data_##inst,        \
++			      &dma_zynq_pl330_config_##inst, POST_KERNEL,                          \
++			      CONFIG_DMA_INIT_PRIORITY, &dma_zynq_pl330_api);
++
++DT_INST_FOREACH_STATUS_OKAY(DMA_ZYNQ_PL330_INIT)
+diff --git a/dts/arm/xilinx/zynq7000.dtsi b/dts/arm/xilinx/zynq7000.dtsi
+index cce3f439bec..6f0f1d7b5c3 100644
+--- a/dts/arm/xilinx/zynq7000.dtsi
++++ b/dts/arm/xilinx/zynq7000.dtsi
+@@ -175,6 +175,25 @@
+ 			tx-fifo-depth = <128>;
+ 		};
+ 
++		dmac_s: dma-controller@f8003000 {
++			compatible = "xlnx,zynq-dma-pl330";
++			reg = <0xf8003000 0x1000>;
++			interrupts = <GIC_SPI 13 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>,
++				     <GIC_SPI 14 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>,
++				     <GIC_SPI 15 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>,
++				     <GIC_SPI 16 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>,
++				     <GIC_SPI 17 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>,
++				     <GIC_SPI 40 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>,
++				     <GIC_SPI 41 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>,
++				     <GIC_SPI 42 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>,
++				     <GIC_SPI 43 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
++			interrupt-names = "abort", "dma0", "dma1", "dma2", "dma3",
++					  "dma4", "dma5", "dma6", "dma7";
++			#dma-cells = <1>;
++			dma-channels = <8>;
++			status = "disabled";
++		};
++
+ 		spi1: spi@e0007000 {
+ 			compatible = "cdns,spi";
+ 			reg = <0xe0007000 0x1000>;
+diff --git a/dts/bindings/dma/xlnx,zynq-dma-pl330.yaml b/dts/bindings/dma/xlnx,zynq-dma-pl330.yaml
+new file mode 100644
+index 00000000000..6ce4eabaa56
+--- /dev/null
++++ b/dts/bindings/dma/xlnx,zynq-dma-pl330.yaml
+@@ -0,0 +1,28 @@
++# SPDX-License-Identifier: Apache-2.0
++
++description: |
++  Xilinx Zynq-7000 PS DMA controller (ARM PrimeCell PL330, DMAC)
++
++  The interrupts are, in order: the abort interrupt followed by one
++  interrupt per DMA channel (event 0..7). Channel n is addressed as
++  "dmas = <&dmac_s n>".
++
++compatible: "xlnx,zynq-dma-pl330"
++
++include: [dma-controller.yaml, base.yaml]
++
++properties:
++  reg:
++    required: true
++
++  interrupts:
++    required: true
++
++  dma-channels:
++    required: true
++
++  "#dma-cells":
++    const: 1
++
++dma-cells:
++  - channel

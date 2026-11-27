@@ -35,6 +35,10 @@
 	status = "disabled";
 };
 
+&dmac_s {
+	status = "disabled";
+};
+
 &gem0 {
 	status = "disabled";
 };

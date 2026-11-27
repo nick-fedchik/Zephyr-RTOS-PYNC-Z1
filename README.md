@@ -41,7 +41,9 @@ Verified on hardware:
   [`docs/adr/0003-cadence-ps-watchdog.md`](docs/adr/0003-cadence-ps-watchdog.md)),
   and a Zynq-7000 PS QSPI controller driver that exposes the on-board NOR flash
   through the standard `flash` API (`0006`, see
-  [`docs/adr/0004-zynq7000-qspi-nor-flash.md`](docs/adr/0004-zynq7000-qspi-nor-flash.md)).
+  [`docs/adr/0004-zynq7000-qspi-nor-flash.md`](docs/adr/0004-zynq7000-qspi-nor-flash.md)),
+  and an interrupt-driven ARM PL330 PS DMA driver for memory-to-memory transfers
+  (`0007`, see [`docs/adr/0005-zynq7000-ps-dma-pl330.md`](docs/adr/0005-zynq7000-ps-dma-pl330.md)).
 
 > **Scope note:** This repository does not synthesize an FPGA bitstream or
 > `BOOT.BIN`. Instead, it reuses the verified `BOOT.BIN` (FSBL + U-Boot) from
@@ -195,6 +197,31 @@ uart:~$ flash erase qspi_flash 0xf00000 0x10000
 ```
 
 The QSPI node is disabled in the AMP build.
+
+## PS DMA (PL330)
+
+The standalone `pynq_z1` build includes an interrupt-driven driver for the PS
+DMA controller (`dmac_s`, `0xF8003000`) that implements the Zephyr `dma` API for
+memory-to-memory transfers: 8 channels, up to 4 chained blocks per channel, any
+length and alignment, completion callback, `dma_stop()` and `dma_get_status()`.
+The driver cleans and invalidates the L1 data cache around each transfer (the L2
+cache is off on this board). Peripheral DMA, scatter/gather and cyclic mode are not
+implemented.
+
+```
+uart:~$ dma info
+uart:~$ dma selftest 1024     # 1 MiB copy, byte-exact check, comparison with memcpy
+uart:~$ dma align             # unaligned source/destination/length sweep
+uart:~$ dma multi             # all 8 channels at once
+uart:~$ dma chain             # three chained blocks
+uart:~$ dma fill              # fixed source address
+uart:~$ dma stop              # abort mid-transfer, then reuse the channel
+uart:~$ dma neg               # invalid configurations are rejected
+```
+
+The DMA node is disabled in the AMP build (Linux owns the controller there). The
+stock Zephyr `tests/drivers/dma/loop_transfer` suite passes with
+`zephyr,user { dma-test-devs = <&dmac_s>; };` in an overlay.
 
 ## Building AMP / OpenAMP (PYNQ Linux on CPU0 + Zephyr on CPU1)
 

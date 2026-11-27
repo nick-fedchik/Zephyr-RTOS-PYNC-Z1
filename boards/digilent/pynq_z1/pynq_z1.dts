@@ -78,6 +78,10 @@
 	status = "okay";
 };
 
+&dmac_s {
+	status = "okay";
+};
+
 &qspi {
 	/* LQSPI reference clock: IO PLL 1000 MHz / 5, programmed by the boot firmware */
 	clock-frequency = <200000000>;
