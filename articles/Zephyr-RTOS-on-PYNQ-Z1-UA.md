@@ -475,6 +475,8 @@ Total wall time (parallel): 11574 us
 - **TFTP** (*Trivial File Transfer Protocol*) — простий протокол передачі файлів по UDP, підтримуваний U-Boot.
 - **TTC** (*Triple Timer Counter*) — апаратний триканальний таймер-лічильник у Zynq-7000 PS.
 - **UART** (*Universal Asynchronous Receiver-Transmitter*) — послідовний інтерфейс консолі.
+- **UDC / UHC** (*USB Device Controller / USB Host Controller*) — драйвери контролерів USB-пристрою та USB-хоста в новому USB-стеку Zephyr.
+- **ULPI** (*UTMI+ Low Pin Interface*) — 12-лінійний інтерфейс між USB-контролером (ChipIdea) і зовнішнім трансівером USB PHY.
 - **WDT** (*Watchdog Timer*) — апаратний сторожовий таймер, що перезавантажує систему при зависанні.
 - **WFE / SEV** (*Wait For Event / Send Event*) — інструкції ARM для низькоенергетичного очікування та пробудження ядра.
 - **XADC** (*Xilinx Analog-to-Digital Converter*) — вбудований 12-бітний АЦП у Zynq-7000 для контролю температури кристала, напруг живлення та аналогових входів.
