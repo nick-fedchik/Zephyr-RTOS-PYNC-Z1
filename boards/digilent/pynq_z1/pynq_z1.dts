@@ -64,6 +64,10 @@
 	status = "okay";
 };
 
+&xadc {
+	status = "okay";
+};
+
 &psgpio {
 	status = "okay";
 };

@@ -5,6 +5,7 @@ project(pynq_z1_hello)
 
 target_sources(app PRIVATE src/main.c)
 target_sources_ifdef(CONFIG_ZYNQ7000_FPGA app PRIVATE src/pl_test.c)
+target_sources_ifdef(CONFIG_ZYNQ7000_XADC app PRIVATE src/xadc_test.c)
 target_sources_ifdef(CONFIG_SMP app PRIVATE src/zynq7000_smp.c)
 if(NOT CONFIG_SMP)
 	target_sources(app PRIVATE

@@ -34,7 +34,9 @@ Verified on hardware:
   [`docs/zephyr-gic-v1-v2-sgi-bug.md`](docs/zephyr-gic-v1-v2-sgi-bug.md)) and
   Zynq-7000 SMP/AMP SoC support (`0002`) and a Zynq-7000 DevCfg FPGA Manager
   driver that programs the PL from Zephyr through PCAP DMA (`0003`, see
-  [`docs/adr/0001-zynq7000-devcfg-fpga-manager.md`](docs/adr/0001-zynq7000-devcfg-fpga-manager.md)).
+  [`docs/adr/0001-zynq7000-devcfg-fpga-manager.md`](docs/adr/0001-zynq7000-devcfg-fpga-manager.md)),
+  and a Zynq-7000 XADC sensor driver for die temperature and supply rails
+  (`0004`, see [`docs/adr/0002-zynq7000-xadc-sensor.md`](docs/adr/0002-zynq7000-xadc-sensor.md)).
 
 > **Scope note:** This repository does not synthesize an FPGA bitstream or
 > `BOOT.BIN`. Instead, it reuses the verified `BOOT.BIN` (FSBL + U-Boot) from
@@ -136,6 +138,22 @@ uart:~$ pl led 5                            # LD0-LD3 via PL AXI GPIO
 `fpga load devcfg@f8007000 <addr> <size>`, `fpga get_status` and `fpga reset`
 work as well. The staging window (`CONFIG_ZYNQ7000_FPGA_STAGING_ADDR/SIZE`) is
 MMU-mapped by the SoC code; use addresses inside it.
+
+## Reading die temperature and supply voltages (XADC)
+
+The XADC sensor driver is enabled for the `pynq_z1` board. In the Zephyr shell:
+
+```
+uart:~$ xadc read
+DIE_TEMP  59.183123 C
+VCCINT    1.020996 V
+VCCAUX    1.799560 V
+...
+```
+
+Applications use `sensor_sample_fetch()` / `sensor_channel_get()` with
+`SENSOR_CHAN_DIE_TEMP` and the `SENSOR_CHAN_XADC_*` channels from
+`<zephyr/drivers/sensor/zynq7000_xadc.h>`.
 
 ## Building AMP / OpenAMP (PYNQ Linux on CPU0 + Zephyr on CPU1)
 
