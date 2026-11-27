@@ -2,7 +2,8 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * PL (FPGA) shell test commands for the Zynq-7000 DevCfg FPGA manager:
- *   pl load <addr> <size>  - program a byte-swapped .bin bitstream from DDR
+ *   pl load <addr> <size>  - program a byte-swapped .bin bitstream from DDR and restore the
+ *                            XADC configuration, which the bitstream resets
  *   pl status              - report fpga_get_status()
  *   pl led [0-15]          - write/read the PYNQ-Z1 base.bit LD0-LD3 AXI GPIO
  *   pl read <addr>         - 32-bit MMIO read (for PL AXI peripherals)
@@ -12,6 +13,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/fpga.h>
+#include <zephyr/drivers/sensor/zynq7000_xadc.h>
 #include <zephyr/kernel.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/sys/sys_io.h>
@@ -50,6 +52,12 @@ static int cmd_pl_load(const struct shell *sh, size_t argc, char **argv)
 
 	shell_print(sh, "PL programmed in %u us, fpga_get_status()=%d", t0,
 		    fpga_get_status(fpga_dev));
+
+	/* The bitstream reloads the XADC registers, so restore the driver configuration */
+	if (DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(xadc))) {
+		err = zynq7000_xadc_reconfigure(DEVICE_DT_GET(DT_NODELABEL(xadc)));
+		shell_print(sh, "XADC reconfigured: %d (alarms disarmed)", err);
+	}
 
 	return 0;
 }

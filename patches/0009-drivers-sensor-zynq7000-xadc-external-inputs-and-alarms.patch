@@ -1,0 +1,1011 @@
+diff --git a/drivers/sensor/xlnx/zynq7000_xadc.c b/drivers/sensor/xlnx/zynq7000_xadc.c
+index cc52ae7988c..3bcc23ce597 100644
+--- a/drivers/sensor/xlnx/zynq7000_xadc.c
++++ b/drivers/sensor/xlnx/zynq7000_xadc.c
+@@ -4,7 +4,12 @@
+  * Reads the on-die temperature and the internal supply monitors through the
+  * XADCIF command/data FIFOs located in the DevCfg block (UG585 chapter 30,
+  * UG480). The register sequence follows mainline Linux
+- * drivers/iio/adc/xilinx-xadc-core.c. Transfers are polled.
++ * drivers/iio/adc/xilinx-xadc-core.c. Register transfers are polled; the
++ * alarm interrupt (XADCIF, GIC SPI 7) is used for threshold events only.
++ *
++ * Besides the internal monitors the driver can sequence the external analog
++ * inputs (VAUX0-15, VP/VN) selected in the devicetree, and it exposes the
++ * over-temperature and supply alarms through sensor attributes and triggers.
+  *
+  * Copyright (c) 2026 Zephyr-RTOS-PYNC-Z1 contributors
+  *
+@@ -19,8 +24,11 @@
+ #include <zephyr/drivers/sensor.h>
+ #include <zephyr/drivers/sensor/zynq7000_xadc.h>
+ #include <zephyr/drivers/syscon.h>
++#include <zephyr/irq.h>
+ #include <zephyr/kernel.h>
+ #include <zephyr/logging/log.h>
++#include <zephyr/spinlock.h>
++#include <zephyr/sys/atomic.h>
+ #include <zephyr/sys/util.h>
+ 
+ LOG_MODULE_REGISTER(zynq7000_xadc, CONFIG_SENSOR_LOG_LEVEL);
+@@ -37,6 +45,10 @@ LOG_MODULE_REGISTER(zynq7000_xadc, CONFIG_SENSOR_LOG_LEVEL);
+ #define CFG_ENABLE        BIT(31)
+ #define CFG_WEDGE         BIT(13)
+ #define CFG_REDGE         BIT(12)
++#define CFG_TCKRATE_MASK  (0x3U << 8)
++#define CFG_TCKRATE_DIV2  (0x0U << 8)
++#define CFG_TCKRATE_DIV4  (0x1U << 8)
++#define CFG_TCKRATE_DIV8  (0x2U << 8)
+ #define CFG_TCKRATE_DIV16 (0x3U << 8)
+ #define CFG_IGAP(x)       ((x) & 0x1f)
+ #define CFG_IGAP_DEFAULT  20
+@@ -44,6 +56,10 @@ LOG_MODULE_REGISTER(zynq7000_xadc, CONFIG_SENSOR_LOG_LEVEL);
+ #define MSTS_DFIFO_LVL_SHIFT 12
+ #define MSTS_DFIFO_LVL_MASK  (0xfU << MSTS_DFIFO_LVL_SHIFT)
+ #define MSTS_DFIFOE          BIT(8)
++#define MSTS_ALARM_MASK      0xffU
++
++/* Alarm bits of INTSTS/INTMSK/MSTS: bit 7 is OT, bits 6:3 are VCCBRAM..VCCO_DDR */
++#define INT_ALARM_MASK 0xffU
+ 
+ #define MCTL_RESET BIT(4)
+ 
+@@ -56,10 +72,55 @@ LOG_MODULE_REGISTER(zynq7000_xadc, CONFIG_SENSOR_LOG_LEVEL);
+ #define XADC_REG_TEMP     0x00
+ #define XADC_REG_VCCINT   0x01
+ #define XADC_REG_VCCAUX   0x02
++#define XADC_REG_VPVN     0x03
+ #define XADC_REG_VCCBRAM  0x06
+ #define XADC_REG_VCCPINT  0x0d
+ #define XADC_REG_VCCPAUX  0x0e
+ #define XADC_REG_VCCO_DDR 0x0f
++#define XADC_REG_VAUX(n)  (0x10 + (n))
++#define XADC_REG_CONF1    0x41
++#define XADC_REG_CONF2    0x42
++#define XADC_REG_SEQ(x)   (0x48 + (x))
++#define XADC_REG_INMODE(x) (0x4c + (x))
++#define XADC_REG_THRESH(x) (0x50 + (x))
++
++#define CONF1_SEQ_MASK         (0xfU << 12)
++#define CONF1_SEQ_DEFAULT      (0x0U << 12)
++#define CONF1_SEQ_CONTINUOUS   (0x2U << 12)
++#define CONF1_SEQ_SIMULTANEOUS (0x4U << 12)
++#define CONF1_ALARM_DISABLE    0x0f0fU
++
++#define CONF2_DIV_MASK  0xff00U
++#define CONF2_DIV_SHIFT 8
++#define CONF2_PD_MASK   (0x3U << 4)
++#define CONF2_PD_ADC_B  (0x2U << 4)
++
++/* SEQ00 bit positions of the internal channels (the same layout as Linux scan_mask) */
++#define SEQ0_CALIBRATION BIT(0)
++#define SEQ0_VCCPINT     BIT(5)
++#define SEQ0_VCCPAUX     BIT(6)
++#define SEQ0_VCCO_DDR    BIT(7)
++#define SEQ0_TEMP        BIT(8)
++#define SEQ0_VCCINT      BIT(9)
++#define SEQ0_VCCAUX      BIT(10)
++#define SEQ0_VPVN        BIT(11)
++#define SEQ0_VCCBRAM     BIT(14)
++
++/* Alarm numbers in the 7-series order (the XADCIF bit order differs, see xadc_alarm_to_hw) */
++#define ALARM_OT      3
++#define ALARM_VCCINT  1
++#define ALARM_VCCAUX  2
++#define ALARM_VCCBRAM 4
++#define ALARM_VCCPINT 5
++#define ALARM_VCCPAUX 6
++#define ALARM_VCCODDR 7
++#define ALARM_COUNT   8
++
++/* Several sequencer passes, so a stale alarm status cannot raise an event when arming */
++#define XADC_ARM_SETTLE_MS 2
++
++/* Thresholds are stored 16-bit left aligned; temperature ones need 0x3 in the low nibble */
++#define XADC_TEMP_THRESH_MARK 0x3U
+ 
+ /* 12-bit result left-aligned in the 16-bit register */
+ #define XADC_RAW_SHIFT       4
+@@ -69,9 +130,29 @@ LOG_MODULE_REGISTER(zynq7000_xadc, CONFIG_SENSOR_LOG_LEVEL);
+ #define XADC_TEMP_OFFSET_MC  273150LL
+ /* Supply monitors: V = raw * 3.0 / 4096 */
+ #define XADC_SUPPLY_FS_UV    3000000LL
++/* External inputs: 0-1 V unipolar, +-0.5 V bipolar, 12 bit */
++#define XADC_AUX_FS_UV       1000000LL
++
++/* Result registers of VP/VN and VAUX0-15 are tracked in one table */
++#define XADC_VPVN_CHAN  16
++#define XADC_AUX_CHANS  17
++#define XADC_AUX_MASK   (BIT(XADC_AUX_CHANS) - 1U)
+ 
++#define SLCR_ARM_PLL_CTRL  0x100
++#define SLCR_DDR_PLL_CTRL  0x104
++#define SLCR_IO_PLL_CTRL   0x108
+ #define SLCR_PCAP_CLK_CTRL 0x168
+ #define PCAP_CLKACT        BIT(0)
++#define PCAP_SRCSEL(x)     (((x) >> 4) & 0x3U)
++#define PCAP_DIVISOR(x)    (((x) >> 8) & 0x3fU)
++#define PLL_BYPASS_FORCE   BIT(4)
++#define PLL_FDIV(x)        (((x) >> 12) & 0x7fU)
++
++#define XADC_TCK_MAX_HZ        50000000U
++#define XADC_PCAP_MAX_HZ       200000000U
++#define XADC_MAX_SAMPLERATE    150000U
++#define XADC_ADC_CYCLES        26U
++#define XADC_UNMASK_PERIOD_MS  500
+ 
+ #define XADC_TIMEOUT_US 5000
+ #define XADC_POLL_US    5
+@@ -100,11 +181,28 @@ static const uint8_t xadc_regs[IDX_COUNT] = {
+ struct zynq_xadc_config {
+ 	mm_reg_t base;
+ 	const struct device *slcr;
++	uint32_t ps_clk_hz;
++	/* Bit n: VAUXn (0-15) or VP/VN (16) is sequenced and read */
++	uint32_t chan_mask;
++	uint32_t bipolar_mask;
++	void (*irq_config)(void);
+ };
+ 
+ struct zynq_xadc_data {
+ 	struct k_mutex lock;
+ 	uint16_t raw[IDX_COUNT];
++	uint16_t aux_raw[XADC_AUX_CHANS];
++
++	/* Alarm handling; the spinlock protects INTMSK and the masks below */
++	struct k_spinlock alarm_lock;
++	uint32_t alarm_en;     /* enabled alarms, XADCIF bit order */
++	uint32_t alarm_masked; /* alarms masked until their condition clears, XADCIF bit order */
++	atomic_t alarm_pending; /* alarms to report, 7-series bit order */
++	const struct device *dev;
++	struct k_work alarm_work;
++	struct k_work_delayable unmask_work;
++	sensor_trigger_handler_t handler[ALARM_COUNT];
++	struct sensor_trigger trigger[ALARM_COUNT];
+ };
+ 
+ static inline uint32_t xadc_read32(const struct device *dev, uint32_t off)
+@@ -128,10 +226,26 @@ static void xadc_drain_fifo(const struct device *dev)
+ 	}
+ }
+ 
++static int xadc_wait_dfifo(const struct device *dev, uint32_t words)
++{
++	uint32_t waited = 0;
++
++	while (((xadc_read32(dev, XADCIF_MSTS) & MSTS_DFIFO_LVL_MASK) >> MSTS_DFIFO_LVL_SHIFT) <
++	       words) {
++		if (waited >= XADC_TIMEOUT_US) {
++			return -ETIMEDOUT;
++		}
++		k_busy_wait(XADC_POLL_US);
++		waited += XADC_POLL_US;
++	}
++
++	return 0;
++}
++
+ /* Read one XADC register; the caller holds the lock. */
+ static int xadc_read_reg(const struct device *dev, uint8_t reg, uint16_t *val)
+ {
+-	uint32_t waited = 0;
++	int err;
+ 
+ 	xadc_drain_fifo(dev);
+ 
+@@ -139,13 +253,9 @@ static int xadc_read_reg(const struct device *dev, uint8_t reg, uint16_t *val)
+ 	xadc_write32(dev, XADCIF_CMDFIFO, XADC_CMD(CMD_NOP, 0, 0));
+ 
+ 	/* The first response belongs to the READ command slot, the second one has the data */
+-	while (((xadc_read32(dev, XADCIF_MSTS) & MSTS_DFIFO_LVL_MASK) >> MSTS_DFIFO_LVL_SHIFT) <
+-	       2U) {
+-		if (waited >= XADC_TIMEOUT_US) {
+-			return -ETIMEDOUT;
+-		}
+-		k_busy_wait(XADC_POLL_US);
+-		waited += XADC_POLL_US;
++	err = xadc_wait_dfifo(dev, 2U);
++	if (err) {
++		return err;
+ 	}
+ 
+ 	(void)xadc_read32(dev, XADCIF_RDFIFO);
+@@ -154,14 +264,132 @@ static int xadc_read_reg(const struct device *dev, uint8_t reg, uint16_t *val)
+ 	return 0;
+ }
+ 
++/* Write one XADC register; the caller holds the lock. */
++static int xadc_write_reg(const struct device *dev, uint8_t reg, uint16_t val)
++{
++	int err;
++
++	xadc_drain_fifo(dev);
++
++	xadc_write32(dev, XADCIF_CMDFIFO, XADC_CMD(CMD_WRITE, reg, val));
++
++	err = xadc_wait_dfifo(dev, 1U);
++	if (err) {
++		return err;
++	}
++
++	(void)xadc_read32(dev, XADCIF_RDFIFO);
++
++	return 0;
++}
++
++static int xadc_update_reg(const struct device *dev, uint8_t reg, uint16_t mask, uint16_t val)
++{
++	uint16_t tmp;
++	int err;
++
++	err = xadc_read_reg(dev, reg, &tmp);
++	if (err) {
++		return err;
++	}
++
++	return xadc_write_reg(dev, reg, (tmp & ~mask) | val);
++}
++
++/* The XADCIF alarm bits are the 7-series ones with OT moved to bit 7 */
++static uint32_t xadc_alarm_to_hw(uint32_t alarm)
++{
++	return ((alarm & 0x08U) << 4) | ((alarm & 0xf0U) >> 1) | (alarm & 0x07U);
++}
++
++static uint32_t xadc_alarm_from_hw(uint32_t hw)
++{
++	return ((hw & 0x80U) >> 4) | ((hw & 0x78U) << 1) | (hw & 0x07U);
++}
++
++/* Caller holds alarm_lock */
++static void xadc_update_intmsk(const struct device *dev)
++{
++	struct zynq_xadc_data *data = dev->data;
++	uint32_t unmasked = data->alarm_en & ~data->alarm_masked;
++
++	/* Only the alarm interrupts are ever used, everything else stays masked */
++	xadc_write32(dev, XADCIF_INTMSK, ~unmasked);
++}
++
++static void zynq_xadc_isr(const struct device *dev)
++{
++	struct zynq_xadc_data *data = dev->data;
++	k_spinlock_key_t key;
++	uint32_t status;
++
++	key = k_spin_lock(&data->alarm_lock);
++
++	status = xadc_read32(dev, XADCIF_INTSTS) & ~xadc_read32(dev, XADCIF_INTMSK);
++	status &= INT_ALARM_MASK;
++
++	/* The alarms are level sensitive: mask the active ones until the condition is gone */
++	data->alarm_masked |= status;
++	xadc_update_intmsk(dev);
++	xadc_write32(dev, XADCIF_INTSTS, status);
++
++	k_spin_unlock(&data->alarm_lock, key);
++
++	if (status) {
++		atomic_or(&data->alarm_pending, xadc_alarm_from_hw(status));
++		k_work_submit(&data->alarm_work);
++		k_work_reschedule(&data->unmask_work, K_MSEC(XADC_UNMASK_PERIOD_MS));
++	}
++}
++
++static void xadc_alarm_work_handler(struct k_work *work)
++{
++	struct zynq_xadc_data *data = CONTAINER_OF(work, struct zynq_xadc_data, alarm_work);
++	uint32_t pending = (uint32_t)atomic_clear(&data->alarm_pending);
++
++	for (int i = 0; i < ALARM_COUNT; i++) {
++		if ((pending & BIT(i)) && data->handler[i] != NULL) {
++			data->handler[i](data->dev, &data->trigger[i]);
++		}
++	}
++}
++
++static void xadc_unmask_work_handler(struct k_work *work)
++{
++	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
++	struct zynq_xadc_data *data = CONTAINER_OF(dwork, struct zynq_xadc_data, unmask_work);
++	const struct device *dev = data->dev;
++	k_spinlock_key_t key;
++	uint32_t active = xadc_read32(dev, XADCIF_MSTS) & MSTS_ALARM_MASK;
++	uint32_t unmask;
++	bool again;
++
++	key = k_spin_lock(&data->alarm_lock);
++
++	unmask = data->alarm_masked & ~active;
++	data->alarm_masked &= active & data->alarm_en;
++	/* Clear stale events before the interrupt is unmasked again */
++	xadc_write32(dev, XADCIF_INTSTS, unmask);
++	xadc_update_intmsk(dev);
++	again = data->alarm_masked != 0U;
++
++	k_spin_unlock(&data->alarm_lock, key);
++
++	if (again) {
++		k_work_reschedule(&data->unmask_work, K_MSEC(XADC_UNMASK_PERIOD_MS));
++	}
++}
++
+ static int zynq_xadc_sample_fetch(const struct device *dev, enum sensor_channel chan)
+ {
++	const struct zynq_xadc_config *cfg = dev->config;
+ 	struct zynq_xadc_data *data = dev->data;
+ 	uint16_t raw[IDX_COUNT];
++	uint16_t aux_raw[XADC_AUX_CHANS];
+ 	int err = 0;
+ 
+ 	if (chan != SENSOR_CHAN_ALL && chan != SENSOR_CHAN_DIE_TEMP &&
+-	    !((int)chan >= SENSOR_CHAN_XADC_VCCINT && (int)chan <= SENSOR_CHAN_XADC_VCCO_DDR)) {
++	    !((int)chan >= SENSOR_CHAN_XADC_VCCINT && (int)chan <= SENSOR_CHAN_XADC_VAUX15)) {
+ 		return -ENOTSUP;
+ 	}
+ 
+@@ -170,12 +398,27 @@ static int zynq_xadc_sample_fetch(const struct device *dev, enum sensor_channel
+ 		err = xadc_read_reg(dev, xadc_regs[i], &raw[i]);
+ 		if (err) {
+ 			LOG_ERR("XADC register 0x%02x read timed out", xadc_regs[i]);
+-			break;
++			goto out;
+ 		}
+ 	}
+-	if (err == 0) {
+-		memcpy(data->raw, raw, sizeof(raw));
++	for (int i = 0; i < XADC_AUX_CHANS; i++) {
++		if (!(cfg->chan_mask & BIT(i))) {
++			continue;
++		}
++		err = xadc_read_reg(dev, i == XADC_VPVN_CHAN ? XADC_REG_VPVN : XADC_REG_VAUX(i),
++				    &aux_raw[i]);
++		if (err) {
++			LOG_ERR("XADC aux channel %d read timed out", i);
++			goto out;
++		}
++	}
++	memcpy(data->raw, raw, sizeof(raw));
++	for (int i = 0; i < XADC_AUX_CHANS; i++) {
++		if (cfg->chan_mask & BIT(i)) {
++			data->aux_raw[i] = aux_raw[i];
++		}
+ 	}
++out:
+ 	k_mutex_unlock(&data->lock);
+ 
+ 	return err;
+@@ -184,9 +427,30 @@ static int zynq_xadc_sample_fetch(const struct device *dev, enum sensor_channel
+ static int zynq_xadc_channel_get(const struct device *dev, enum sensor_channel chan,
+ 				 struct sensor_value *val)
+ {
++	const struct zynq_xadc_config *cfg = dev->config;
+ 	struct zynq_xadc_data *data = dev->data;
+ 	int64_t raw;
+ 
++	if ((int)chan >= SENSOR_CHAN_XADC_VPVN && (int)chan <= SENSOR_CHAN_XADC_VAUX15) {
++		int idx = (int)chan == SENSOR_CHAN_XADC_VPVN ? XADC_VPVN_CHAN
++							     : (int)chan - SENSOR_CHAN_XADC_VAUX0;
++
++		if (!(cfg->chan_mask & BIT(idx))) {
++			return -ENOTSUP;
++		}
++
++		k_mutex_lock(&data->lock, K_FOREVER);
++		raw = data->aux_raw[idx] >> XADC_RAW_SHIFT;
++		k_mutex_unlock(&data->lock);
++
++		if (cfg->bipolar_mask & BIT(idx)) {
++			raw = (int64_t)((int16_t)(raw << XADC_RAW_SHIFT)) >> XADC_RAW_SHIFT;
++		}
++
++		/* volts at the XADC pin */
++		return sensor_value_from_micro(val, (raw * XADC_AUX_FS_UV) / (1 << XADC_RESOLUTION_BITS));
++	}
++
+ 	k_mutex_lock(&data->lock, K_FOREVER);
+ 	switch ((int)chan) {
+ 	case SENSOR_CHAN_DIE_TEMP:
+@@ -226,50 +490,501 @@ static int zynq_xadc_channel_get(const struct device *dev, enum sensor_channel c
+ 	return sensor_value_from_micro(val, (raw * XADC_SUPPLY_FS_UV) >> XADC_RESOLUTION_BITS);
+ }
+ 
+-static int zynq_xadc_init(const struct device *dev)
++/* Threshold register and alarm number of a channel; lower is the 4 registers above upper */
++static int xadc_thresh_lookup(enum sensor_channel chan, enum sensor_attribute attr, uint8_t *reg,
++			      uint8_t *alarm, bool *is_temp)
++{
++	uint8_t upper;
++
++	*is_temp = false;
++
++	switch ((int)chan) {
++	case SENSOR_CHAN_DIE_TEMP:
++		/* The temperature alarm is the over-temperature (OT) one, as in Linux */
++		upper = 0x3;
++		*alarm = ALARM_OT;
++		*is_temp = true;
++		break;
++	case SENSOR_CHAN_XADC_VCCINT:
++		upper = 0x1;
++		*alarm = ALARM_VCCINT;
++		break;
++	case SENSOR_CHAN_XADC_VCCAUX:
++		upper = 0x2;
++		*alarm = ALARM_VCCAUX;
++		break;
++	case SENSOR_CHAN_XADC_VCCBRAM:
++		upper = 0x8;
++		*alarm = ALARM_VCCBRAM;
++		break;
++	case SENSOR_CHAN_XADC_VCCPINT:
++		upper = 0x9;
++		*alarm = ALARM_VCCPINT;
++		break;
++	case SENSOR_CHAN_XADC_VCCPAUX:
++		upper = 0xa;
++		*alarm = ALARM_VCCPAUX;
++		break;
++	case SENSOR_CHAN_XADC_VCCO_DDR:
++		upper = 0xb;
++		*alarm = ALARM_VCCODDR;
++		break;
++	default:
++		return -ENOTSUP;
++	}
++
++	switch (attr) {
++	case SENSOR_ATTR_UPPER_THRESH:
++		*reg = XADC_REG_THRESH(upper);
++		break;
++	case SENSOR_ATTR_LOWER_THRESH:
++		*reg = XADC_REG_THRESH(upper + 4U);
++		break;
++	default:
++		return -ENOTSUP;
++	}
++
++	return 0;
++}
++
++static uint16_t xadc_thresh_encode(const struct sensor_value *val, bool is_temp)
++{
++	int64_t micro = sensor_value_to_micro(val);
++	int64_t raw;
++
++	if (is_temp) {
++		raw = ((micro + XADC_TEMP_OFFSET_MC * 1000LL) << XADC_RESOLUTION_BITS) /
++		      (XADC_TEMP_SCALE_MC * 1000LL);
++	} else {
++		raw = (micro << XADC_RESOLUTION_BITS) / XADC_SUPPLY_FS_UV;
++	}
++	raw = CLAMP(raw, 0, BIT_MASK(XADC_RESOLUTION_BITS));
++
++	return (raw << XADC_RAW_SHIFT) | (is_temp ? XADC_TEMP_THRESH_MARK : 0U);
++}
++
++static void xadc_thresh_decode(uint16_t reg, struct sensor_value *val, bool is_temp)
++{
++	int64_t raw = reg >> XADC_RAW_SHIFT;
++
++	if (is_temp) {
++		sensor_value_from_micro(val, ((raw * XADC_TEMP_SCALE_MC * 1000LL) >>
++					      XADC_RESOLUTION_BITS) -
++						     XADC_TEMP_OFFSET_MC * 1000LL);
++	} else {
++		sensor_value_from_micro(val, (raw * XADC_SUPPLY_FS_UV) >> XADC_RESOLUTION_BITS);
++	}
++}
++
++static int zynq_xadc_attr_set(const struct device *dev, enum sensor_channel chan,
++			      enum sensor_attribute attr, const struct sensor_value *val)
+ {
+-	const struct zynq_xadc_config *cfg = dev->config;
+ 	struct zynq_xadc_data *data = dev->data;
+-	uint32_t val;
++	uint8_t reg, alarm;
++	bool is_temp;
++	int err;
+ 
+-	if (!device_is_ready(cfg->slcr)) {
+-		LOG_ERR("SLCR device not ready");
+-		return -ENODEV;
++	err = xadc_thresh_lookup(chan, attr, &reg, &alarm, &is_temp);
++	if (err) {
++		return err;
+ 	}
+ 
+-	k_mutex_init(&data->lock);
++	k_mutex_lock(&data->lock, K_FOREVER);
++	err = xadc_write_reg(dev, reg, xadc_thresh_encode(val, is_temp));
++	k_mutex_unlock(&data->lock);
++
++	return err;
++}
++
++static int zynq_xadc_attr_get(const struct device *dev, enum sensor_channel chan,
++			      enum sensor_attribute attr, struct sensor_value *val)
++{
++	struct zynq_xadc_data *data = dev->data;
++	uint8_t reg, alarm;
++	uint16_t raw;
++	bool is_temp;
++	int err;
++
++	err = xadc_thresh_lookup(chan, attr, &reg, &alarm, &is_temp);
++	if (err) {
++		return err;
++	}
++
++	k_mutex_lock(&data->lock, K_FOREVER);
++	err = xadc_read_reg(dev, reg, &raw);
++	k_mutex_unlock(&data->lock);
++	if (err == 0) {
++		xadc_thresh_decode(raw, val, is_temp);
++	}
++
++	return err;
++}
++
++/* Enable or disable one alarm in CONF1 (disable bits) and in the interrupt mask */
++static int xadc_alarm_enable(const struct device *dev, uint8_t alarm, bool enable)
++{
++	struct zynq_xadc_data *data = dev->data;
++	uint32_t hw = xadc_alarm_to_hw(BIT(alarm));
++	k_spinlock_key_t key;
++	uint16_t dis;
++	int err;
++
++	if (alarm == ALARM_OT) {
++		dis = BIT(0);
++	} else if (alarm < ALARM_OT) {
++		dis = BIT(alarm + 1U);
++	} else {
++		dis = BIT(alarm + 4U);
++	}
++
++	/* Keep the interrupt masked while the alarm is switched, so no stale status is reported */
++	key = k_spin_lock(&data->alarm_lock);
++	if (enable) {
++		data->alarm_masked |= hw;
++	} else {
++		data->alarm_en &= ~hw;
++		data->alarm_masked &= ~hw;
++	}
++	xadc_update_intmsk(dev);
++	k_spin_unlock(&data->alarm_lock, key);
++
++	k_mutex_lock(&data->lock, K_FOREVER);
++	err = xadc_update_reg(dev, XADC_REG_CONF1, dis, enable ? 0U : dis);
++	k_mutex_unlock(&data->lock);
++	if (err) {
++		return err;
++	}
++
++	if (enable) {
++		/* Let the sequencer refresh the alarm status with the new thresholds */
++		k_msleep(XADC_ARM_SETTLE_MS);
++
++		key = k_spin_lock(&data->alarm_lock);
++		/* Drop events that were latched while the alarm was disabled */
++		xadc_write32(dev, XADCIF_INTSTS, hw);
++		data->alarm_en |= hw;
++		data->alarm_masked &= ~hw;
++		xadc_update_intmsk(dev);
++		k_spin_unlock(&data->alarm_lock, key);
++	}
++
++	return 0;
++}
++
++static int zynq_xadc_trigger_set(const struct device *dev, const struct sensor_trigger *trig,
++				 sensor_trigger_handler_t handler)
++{
++	struct zynq_xadc_data *data = dev->data;
++	k_spinlock_key_t key;
++	uint8_t reg, alarm;
++	bool is_temp, armed;
++	int err;
++
++	if (trig == NULL || trig->type != SENSOR_TRIG_THRESHOLD) {
++		return -ENOTSUP;
++	}
++
++	err = xadc_thresh_lookup(trig->chan, SENSOR_ATTR_UPPER_THRESH, &reg, &alarm, &is_temp);
++	if (err) {
++		return err;
++	}
++
++	if (handler == NULL) {
++		err = xadc_alarm_enable(dev, alarm, false);
++		data->handler[alarm] = NULL;
++		return err;
++	}
++
++	key = k_spin_lock(&data->alarm_lock);
++	armed = (data->alarm_en & xadc_alarm_to_hw(BIT(alarm))) != 0U;
++	k_spin_unlock(&data->alarm_lock, key);
++
++	data->trigger[alarm] = *trig;
++	data->handler[alarm] = handler;
++
++	/* Already armed: only the handler changes, an active alarm must not be reported again */
++	if (armed) {
++		return 0;
++	}
++
++	return xadc_alarm_enable(dev, alarm, true);
++}
++
++/* PCAP clock rate from the SLCR PLL and divider settings, 0 if it cannot be determined */
++static uint32_t xadc_pcap_rate(const struct device *dev)
++{
++	const struct zynq_xadc_config *cfg = dev->config;
++	uint32_t ctrl, pll, pll_reg;
++	uint64_t rate;
++
++	if (syscon_read_reg(cfg->slcr, SLCR_PCAP_CLK_CTRL, &ctrl) != 0 ||
++	    PCAP_DIVISOR(ctrl) == 0U) {
++		return 0U;
++	}
++
++	switch (PCAP_SRCSEL(ctrl)) {
++	case 2:
++		pll_reg = SLCR_ARM_PLL_CTRL;
++		break;
++	case 3:
++		pll_reg = SLCR_DDR_PLL_CTRL;
++		break;
++	default:
++		pll_reg = SLCR_IO_PLL_CTRL;
++		break;
++	}
++
++	if (syscon_read_reg(cfg->slcr, pll_reg, &pll) != 0) {
++		return 0U;
++	}
++
++	rate = cfg->ps_clk_hz;
++	if (!(pll & PLL_BYPASS_FORCE)) {
++		rate *= PLL_FDIV(pll);
++	}
++
++	return rate / PCAP_DIVISOR(ctrl);
++}
++
++/* Fastest TCK rate (CFG.TCKRATE) not above 50 MHz, the same rule as Linux. Returns the divider. */
++static uint32_t xadc_tck_divider(uint32_t pcap_rate, uint32_t *tckrate)
++{
++	uint32_t div;
++
++	if (pcap_rate == 0U) {
++		*tckrate = CFG_TCKRATE_DIV16;
++		return 16U;
++	}
++
++	if (XADC_TCK_MAX_HZ > pcap_rate / 2U) {
++		div = 2U;
++	} else {
++		div = pcap_rate / XADC_TCK_MAX_HZ;
++		if (pcap_rate / div > XADC_TCK_MAX_HZ) {
++			div++;
++		}
++	}
++
++	if (div <= 3U) {
++		*tckrate = CFG_TCKRATE_DIV2;
++		return 2U;
++	} else if (div <= 7U) {
++		*tckrate = CFG_TCKRATE_DIV4;
++		return 4U;
++	} else if (div <= 15U) {
++		*tckrate = CFG_TCKRATE_DIV8;
++		return 8U;
++	}
++
++	*tckrate = CFG_TCKRATE_DIV16;
++	return 16U;
++}
++
++/* Keep the conversion rate at or below 150 kSPS (26 ADCCLK cycles per conversion), as Linux */
++static int xadc_set_samplerate(const struct device *dev, uint32_t dclk)
++{
++	uint32_t val = XADC_MAX_SAMPLERATE * XADC_ADC_CYCLES;
++	uint32_t div;
++
++	if (dclk == 0U) {
++		return 0;
++	}
++
++	val = MAX(val, 1000000U);
++	div = MAX(dclk / val, 1U);
++	if (dclk / div / XADC_ADC_CYCLES > XADC_MAX_SAMPLERATE) {
++		div++;
++	}
++	div = CLAMP(div, 2U, 0xffU);
++
++	return xadc_update_reg(dev, XADC_REG_CONF2, CONF2_DIV_MASK, div << CONF2_DIV_SHIFT);
++}
++
++/* Program the sequencer for the internal channels plus the configured external inputs */
++static int xadc_setup_sequencer(const struct device *dev)
++{
++	const struct zynq_xadc_config *cfg = dev->config;
++	uint16_t aux = cfg->chan_mask & 0xffffU;
++	bool simultaneous = (aux & 0xff00U) && (aux & 0x00ffU);
++	uint16_t seq0 = SEQ0_CALIBRATION | SEQ0_VCCPINT | SEQ0_VCCPAUX | SEQ0_VCCO_DDR |
++			SEQ0_TEMP | SEQ0_VCCINT | SEQ0_VCCAUX | SEQ0_VCCBRAM;
++	uint16_t seq1 = aux;
++	uint16_t inmode0 = 0;
++	int err;
++
++	if (cfg->chan_mask & BIT(XADC_VPVN_CHAN)) {
++		seq0 |= SEQ0_VPVN;
++	}
++	if (cfg->bipolar_mask & BIT(XADC_VPVN_CHAN)) {
++		inmode0 |= SEQ0_VPVN;
++	}
++	/*
++	 * In simultaneous mode both ADCs convert VAUXn and VAUXn+8 together; the sequencer bit of
++	 * the lower channel covers the pair and the upper byte is ignored.
++	 */
++	if (simultaneous) {
++		seq1 = (aux | (aux >> 8)) & 0x00ffU;
++	}
++
++	err = xadc_update_reg(dev, XADC_REG_CONF1, CONF1_SEQ_MASK, CONF1_SEQ_DEFAULT);
++	if (err == 0) {
++		err = xadc_write_reg(dev, XADC_REG_INMODE(0), inmode0);
++	}
++	if (err == 0) {
++		err = xadc_write_reg(dev, XADC_REG_INMODE(1), cfg->bipolar_mask & 0xffffU);
++	}
++	if (err == 0) {
++		err = xadc_write_reg(dev, XADC_REG_SEQ(0), seq0);
++	}
++	if (err == 0) {
++		err = xadc_write_reg(dev, XADC_REG_SEQ(1), seq1);
++	}
++	if (err == 0) {
++		/* ADC B is only needed when it converts the upper aux channels simultaneously */
++		err = xadc_update_reg(dev, XADC_REG_CONF2, CONF2_PD_MASK,
++				      simultaneous ? 0U : CONF2_PD_ADC_B);
++	}
++	if (err == 0) {
++		err = xadc_update_reg(dev, XADC_REG_CONF1, CONF1_SEQ_MASK,
++				      simultaneous ? CONF1_SEQ_SIMULTANEOUS
++						   : CONF1_SEQ_CONTINUOUS);
++	}
++
++	return err;
++}
++
++/* Program the XADC interface, sample rate and sequencer; all alarms end up disabled. */
++static int xadc_hw_setup(const struct device *dev)
++{
++	const struct zynq_xadc_config *cfg = dev->config;
++	uint32_t val, pcap_rate, tckrate, tck_div;
++	int err;
+ 
+ 	/* The XADC interface is clocked by the PCAP clock. */
+ 	if (syscon_read_reg(cfg->slcr, SLCR_PCAP_CLK_CTRL, &val) == 0 && !(val & PCAP_CLKACT)) {
+ 		(void)syscon_write_reg(cfg->slcr, SLCR_PCAP_CLK_CTRL, val | PCAP_CLKACT);
+ 	}
+ 
++	pcap_rate = xadc_pcap_rate(dev);
++	tck_div = xadc_tck_divider(pcap_rate, &tckrate);
++	if (pcap_rate == 0U) {
++		LOG_WRN("PCAP clock rate unknown, using the slowest XADC TCK (PCAP/16)");
++	} else if (pcap_rate > XADC_PCAP_MAX_HZ) {
++		LOG_WRN("PCAP clock %u Hz exceeds %u Hz", pcap_rate, XADC_PCAP_MAX_HZ);
++	}
++	LOG_DBG("PCAP clock %u Hz, XADC TCK = PCAP / %u", pcap_rate, tck_div);
++
+ 	xadc_write32(dev, XADCIF_MCTL, MCTL_RESET);
+ 	xadc_write32(dev, XADCIF_MCTL, 0);
+ 	xadc_write32(dev, XADCIF_INTSTS, UINT32_MAX);
+-	/* All interrupts masked, results are polled */
++	/* All interrupts masked until an alarm trigger is set */
+ 	xadc_write32(dev, XADCIF_INTMSK, UINT32_MAX);
+-	/*
+-	 * Slowest TCK divider (PCAP clock / 16, at most 12.5 MHz), well below the 50 MHz
+-	 * limit and independent of the PCAP clock configuration chosen by U-Boot/Linux.
+-	 */
+ 	xadc_write32(dev, XADCIF_CFG,
+-		     CFG_ENABLE | CFG_REDGE | CFG_WEDGE | CFG_TCKRATE_DIV16 |
+-			     CFG_IGAP(CFG_IGAP_DEFAULT));
++		     CFG_ENABLE | CFG_REDGE | CFG_WEDGE | tckrate | CFG_IGAP(CFG_IGAP_DEFAULT));
++
++	/* All alarms start disabled; zynq_xadc_trigger_set() enables them one by one */
++	err = xadc_update_reg(dev, XADC_REG_CONF1, CONF1_ALARM_DISABLE, CONF1_ALARM_DISABLE);
++	if (err == 0) {
++		err = xadc_set_samplerate(dev, pcap_rate ? pcap_rate / tck_div : 0U);
++	}
++	if (err == 0 && cfg->chan_mask != 0U) {
++		err = xadc_setup_sequencer(dev);
++	}
++
++	return err;
++}
++
++int zynq7000_xadc_reconfigure(const struct device *dev)
++{
++	struct zynq_xadc_data *data = dev->data;
++	k_spinlock_key_t key;
++	int err;
++
++	if (!device_is_ready(dev)) {
++		return -ENODEV;
++	}
++
++	/* Stop the deferred work first, nothing can re-arm an alarm that is being reset */
++	(void)k_work_cancel_delayable(&data->unmask_work);
++
++	key = k_spin_lock(&data->alarm_lock);
++	data->alarm_en = 0U;
++	data->alarm_masked = 0U;
++	(void)atomic_set(&data->alarm_pending, 0);
++	k_spin_unlock(&data->alarm_lock, key);
++
++	for (int i = 0; i < ALARM_COUNT; i++) {
++		data->handler[i] = NULL;
++	}
++
++	k_mutex_lock(&data->lock, K_FOREVER);
++	err = xadc_hw_setup(dev);
++	k_mutex_unlock(&data->lock);
++
++	return err;
++}
++
++static int zynq_xadc_init(const struct device *dev)
++{
++	const struct zynq_xadc_config *cfg = dev->config;
++	struct zynq_xadc_data *data = dev->data;
++	int err;
++
++	if (!device_is_ready(cfg->slcr)) {
++		LOG_ERR("SLCR device not ready");
++		return -ENODEV;
++	}
++
++	data->dev = dev;
++	k_mutex_init(&data->lock);
++	k_work_init(&data->alarm_work, xadc_alarm_work_handler);
++	k_work_init_delayable(&data->unmask_work, xadc_unmask_work_handler);
++
++	err = xadc_hw_setup(dev);
++	if (err) {
++		LOG_ERR("XADC setup failed: %d", err);
++		return err;
++	}
++
++	cfg->irq_config();
+ 
+ 	return 0;
+ }
+ 
+ static DEVICE_API(sensor, zynq_xadc_api) = {
++	.attr_set = zynq_xadc_attr_set,
++	.attr_get = zynq_xadc_attr_get,
++	.trigger_set = zynq_xadc_trigger_set,
+ 	.sample_fetch = zynq_xadc_sample_fetch,
+ 	.channel_get = zynq_xadc_channel_get,
+ };
+ 
++#define XADC_CHAN_BIT(node_id, prop, idx) BIT(DT_PROP_BY_IDX(node_id, prop, idx))
++#define XADC_CHAN_MASK(prop)                                                                       \
++	COND_CODE_1(DT_INST_NODE_HAS_PROP(0, prop),                                                \
++		    ((DT_INST_FOREACH_PROP_ELEM_SEP(0, prop, XADC_CHAN_BIT, (|)))), (0))
++
++BUILD_ASSERT((XADC_CHAN_MASK(xlnx_channels) & ~XADC_AUX_MASK) == 0,
++	     "xlnx,channels entries must be 0-15 (VAUX) or 16 (VP/VN)");
++BUILD_ASSERT((XADC_CHAN_MASK(xlnx_bipolar_channels) & ~XADC_CHAN_MASK(xlnx_channels)) == 0,
++	     "xlnx,bipolar-channels must be a subset of xlnx,channels");
++
++static void zynq_xadc_irq_config(void)
++{
++	IRQ_CONNECT(DT_INST_IRQN(0), DT_INST_IRQ(0, priority), zynq_xadc_isr,
++		    DEVICE_DT_INST_GET(0), DT_INST_IRQ(0, flags));
++	irq_enable(DT_INST_IRQN(0));
++}
++
+ static struct zynq_xadc_data zynq_xadc_data_0;
+ 
+ static const struct zynq_xadc_config zynq_xadc_config_0 = {
+ 	.base = DT_INST_REG_ADDR(0),
+ 	.slcr = DEVICE_DT_GET(DT_INST_PHANDLE(0, syscon)),
++	.ps_clk_hz = DT_INST_PROP(0, ps_clk_frequency),
++	.chan_mask = XADC_CHAN_MASK(xlnx_channels),
++	.bipolar_mask = XADC_CHAN_MASK(xlnx_bipolar_channels),
++	.irq_config = zynq_xadc_irq_config,
+ };
+ 
+ SENSOR_DEVICE_DT_INST_DEFINE(0, zynq_xadc_init, NULL, &zynq_xadc_data_0, &zynq_xadc_config_0,
+diff --git a/dts/bindings/sensor/xlnx,zynq-xadc-1.00.a.yaml b/dts/bindings/sensor/xlnx,zynq-xadc-1.00.a.yaml
+index 2b651e7bbb4..d9d2ea4f19e 100644
+--- a/dts/bindings/sensor/xlnx,zynq-xadc-1.00.a.yaml
++++ b/dts/bindings/sensor/xlnx,zynq-xadc-1.00.a.yaml
+@@ -21,3 +21,26 @@ properties:
+     description: |
+       Phandle to the System Level Control Registers (SLCR) node, used to make
+       sure that the PCAP clock that drives the XADC interface is enabled.
++
++  ps-clk-frequency:
++    type: int
++    default: 33333333
++    description: |
++      Frequency of the PS_CLK input in Hz. Together with the PLL and divider
++      settings in the SLCR it gives the PCAP clock that drives the XADC
++      interface, from which the TCK divider is derived. The PYNQ-Z1 uses 50 MHz.
++
++  xlnx,channels:
++    type: array
++    description: |
++      External analog inputs to include in the XADC sequence: 0 to 15 select
++      VAUX0 to VAUX15 and 16 selects the dedicated VP/VN pair. When the
++      property is absent the XADC keeps its default internal-only sequence.
++      The inputs are read as sensor channels SENSOR_CHAN_XADC_VAUX(n) and
++      SENSOR_CHAN_XADC_VPVN.
++
++  xlnx,bipolar-channels:
++    type: array
++    description: |
++      Subset of xlnx,channels that is wired as a bipolar (differential,
++      +-0.5 V) input. All other channels are unipolar (0 to 1 V).
+diff --git a/include/zephyr/drivers/sensor/zynq7000_xadc.h b/include/zephyr/drivers/sensor/zynq7000_xadc.h
+index 51a5f7ca302..f2c843e0d96 100644
+--- a/include/zephyr/drivers/sensor/zynq7000_xadc.h
++++ b/include/zephyr/drivers/sensor/zynq7000_xadc.h
+@@ -17,6 +17,19 @@
+ /**
+  * Driver specific channels. Values are reported in volts. The on-die
+  * temperature is available as SENSOR_CHAN_DIE_TEMP (degrees Celsius).
++ *
++ * The external analog inputs are only sequenced and readable when they are
++ * listed in the @c xlnx,channels devicetree property. Their value is the
++ * voltage at the XADC pin (0 to 1 V unipolar, -0.5 to +0.5 V bipolar); any
++ * board level divider has to be applied by the application.
++ *
++ * Alarms: sensor_attr_set() with SENSOR_ATTR_UPPER_THRESH or
++ * SENSOR_ATTR_LOWER_THRESH sets the thresholds of SENSOR_CHAN_DIE_TEMP (the
++ * over-temperature alarm; the lower value is the level where it is released)
++ * and of the six supply channels. sensor_trigger_set() with
++ * SENSOR_TRIG_THRESHOLD and a handler arms the alarm for that channel and a
++ * NULL handler disarms it. Handlers run from the system work queue and an
++ * alarm that stays active is reported once, then re-armed after it clears.
+  */
+ enum sensor_channel_zynq7000_xadc {
+ 	/** PL core supply (VCCINT, ~1.0 V) */
+@@ -31,6 +44,31 @@ enum sensor_channel_zynq7000_xadc {
+ 	SENSOR_CHAN_XADC_VCCPAUX,
+ 	/** PS DDR I/O supply (VCCO_DDR, ~1.5 V on PYNQ-Z1) */
+ 	SENSOR_CHAN_XADC_VCCO_DDR,
++	/** Dedicated analog input pair VP/VN */
++	SENSOR_CHAN_XADC_VPVN,
++	/** Auxiliary analog input VAUX0 (VAUXn is SENSOR_CHAN_XADC_VAUX(n)) */
++	SENSOR_CHAN_XADC_VAUX0,
++	/** Auxiliary analog input VAUX15 */
++	SENSOR_CHAN_XADC_VAUX15 = SENSOR_CHAN_XADC_VAUX0 + 15,
+ };
+ 
++/** Channel of the auxiliary analog input VAUXn, n = 0..15 */
++#define SENSOR_CHAN_XADC_VAUX(n) ((enum sensor_channel)(SENSOR_CHAN_XADC_VAUX0 + (n)))
++
++/**
++ * @brief Reprogram the XADC after the PL was configured
++ *
++ * Configuring the PL reloads the XADC registers (sequencer, thresholds, alarm
++ * enables) from the bitstream, so the driver settings are lost. This restores the
++ * sample rate and the sequencer from the devicetree and leaves every alarm
++ * disarmed; triggers and thresholds must be set again afterwards.
++ *
++ * @param dev XADC device
++ *
++ * @retval 0 Success
++ * @retval -ENODEV Device not ready
++ * @retval -ETIMEDOUT XADC interface timeout
++ */
++int zynq7000_xadc_reconfigure(const struct device *dev);
++
+ #endif /* ZEPHYR_INCLUDE_DRIVERS_SENSOR_ZYNQ7000_XADC_H_ */

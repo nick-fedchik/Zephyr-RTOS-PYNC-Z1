@@ -156,9 +156,10 @@ Notes:
 
 ## Open items / follow-ups
 
-- Interrupt-driven reads and alarm/over-temperature thresholds.
-- External analog inputs (VAUX, VP/VN; PYNQ-Z1 Arduino A0-A5) through the
-  sequencer and input-mode registers.
-- Derive the TCK divider from the real PCAP clock rate once a clock handle exists.
+- ~~Interrupt-driven reads and alarm/over-temperature thresholds.~~ Done, see
+  [ADR 0007](0007-zynq7000-xadc-aux-inputs-and-alarms.md).
+- ~~External analog inputs (VAUX, VP/VN; PYNQ-Z1 Arduino A0-A5) through the
+  sequencer and input-mode registers.~~ Done, see ADR 0007.
+- ~~Derive the TCK divider from the real PCAP clock rate.~~ Done, see ADR 0007 (D6).
 - Teach the generic `sensor` shell about the driver-specific channels or move
   to chan_spec/decoder support.

@@ -45,7 +45,10 @@ Verified on hardware:
   and an interrupt-driven ARM PL330 PS DMA driver for memory-to-memory transfers
   (`0007`, see [`docs/adr/0005-zynq7000-ps-dma-pl330.md`](docs/adr/0005-zynq7000-ps-dma-pl330.md)),
   and a `hwinfo` reset-cause driver plus `sys_reboot()` through the SLCR
-  (`0008`, see [`docs/adr/0006-zynq7000-hwinfo-reset-cause-and-reboot.md`](docs/adr/0006-zynq7000-hwinfo-reset-cause-and-reboot.md)).
+  (`0008`, see [`docs/adr/0006-zynq7000-hwinfo-reset-cause-and-reboot.md`](docs/adr/0006-zynq7000-hwinfo-reset-cause-and-reboot.md)),
+  and an extension of the XADC driver with the external analog inputs
+  (Arduino A0-A5), threshold alarms and interrupts (`0009`, see
+  [`docs/adr/0007-zynq7000-xadc-aux-inputs-and-alarms.md`](docs/adr/0007-zynq7000-xadc-aux-inputs-and-alarms.md)).
 
 > **Scope note:** This repository does not synthesize an FPGA bitstream or
 > `BOOT.BIN`. Instead, it reuses the verified `BOOT.BIN` (FSBL + U-Boot) from
@@ -200,6 +203,29 @@ uart:~$ hwinfo reset_cause supported
 
 After `kernel reboot cold` the board goes through BootROM and U-Boot again, so the
 TFTP netboot starts normally.
+
+## XADC external inputs and alarms
+
+The XADC driver also reads the six Arduino analog pins and raises threshold
+alarms through the standard `sensor` API. `xlnx,channels` in the board DTS selects
+the inputs: A0-A5 are VAUX1, 9, 6, 15, 5 and 13 (unipolar, 0-3.3 V on the pin is
+scaled to 0-1 V at the XADC). The inputs only work after the PL is configured,
+for example with `PL_BITSTREAM=base.bin ./setup_and_build.sh` and `pl load`.
+Never apply more than 3.3 V.
+
+```
+uart:~$ pl load 0x05000000 4045564
+uart:~$ xadc ain                              # A0-A5: pin volts and board mV
+uart:~$ xadc aux                              # every enabled VAUX channel
+uart:~$ xadc alarm ot 70 60                   # over-temperature upper/lower (C)
+uart:~$ xadc alarm vcc int 1100 900           # int|aux|bram|pint|paux|ddr, mV
+uart:~$ xadc alarm status                     # thresholds, event counts, XADCIF regs
+uart:~$ xadc alarm off
+```
+
+An alarm that stays active is reported once and re-arms after it clears. Loading a
+bitstream resets the XADC registers, so `pl load` calls
+`zynq7000_xadc_reconfigure()` and disarms all alarms; arm them again afterwards.
 
 ## QSPI NOR flash
 

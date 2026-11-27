@@ -152,13 +152,20 @@ pip install -q -r "$ZEPHYR_WS/zephyr/scripts/requirements-base.txt"
 popd >/dev/null
 
 if [[ -d "$WORK_DIR/patches" ]]; then
-	for patch_file in "$WORK_DIR"/patches/*.patch; do
-		[[ -f "$patch_file" ]] || continue
-		if git -C "$ZEPHYR_WS/zephyr" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
-			continue
+	# The patches form a stack and a later one may modify files created by an earlier one,
+	# so an earlier patch stops reverse-applying once a later one is in. Find the topmost
+	# patch that is already applied and apply only the ones after it.
+	mapfile -t PATCH_FILES < <(find "$WORK_DIR/patches" -maxdepth 1 -name '*.patch' | sort)
+	top=-1
+	for ((i = ${#PATCH_FILES[@]} - 1; i >= 0; i--)); do
+		if git -C "$ZEPHYR_WS/zephyr" apply --reverse --check "${PATCH_FILES[i]}" >/dev/null 2>&1; then
+			top=$i
+			break
 		fi
-		echo ">>> Applying Zephyr patch: $(basename "$patch_file")"
-		git -C "$ZEPHYR_WS/zephyr" apply "$patch_file"
+	done
+	for ((i = top + 1; i < ${#PATCH_FILES[@]}; i++)); do
+		echo ">>> Applying Zephyr patch: $(basename "${PATCH_FILES[i]}")"
+		git -C "$ZEPHYR_WS/zephyr" apply "${PATCH_FILES[i]}"
 	done
 fi
 

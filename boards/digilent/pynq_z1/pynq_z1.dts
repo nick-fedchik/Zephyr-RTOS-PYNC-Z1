@@ -69,6 +69,13 @@
 };
 
 &xadc {
+	/* PS_CLK is a 50 MHz oscillator: ARM PLL 1300 MHz (CPU 650 MHz), IO PLL 1000 MHz */
+	ps-clk-frequency = <50000000>;
+	/*
+	 * Arduino analog pins A0-A5 are VAUX1, VAUX9, VAUX6, VAUX15, VAUX5 and VAUX13. The board
+	 * scales 0-3.3 V down to the 0-1 V XADC range; all of them are unipolar.
+	 */
+	xlnx,channels = <1 9 6 15 5 13>;
 	status = "okay";
 };
 
