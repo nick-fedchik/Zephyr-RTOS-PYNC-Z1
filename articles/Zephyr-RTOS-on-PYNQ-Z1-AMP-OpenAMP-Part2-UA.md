@@ -455,7 +455,21 @@ OK rgb=0x12 (176.5 us)
 
 ---
 
-## 12. [TODO] Далі: апаратний PWM у FPGA PL і зовнішні сенсори
+## 12. Розширення підтримки Zynq-7000 у Zephyr 4.5.0: патчі `0003–0010` і ADR
+
+Окрім AMP-зв’язки з Linux, у репозиторії проєкту закрито основні прогалини периферії PS Zynq-7000 у Zephyr 4.5.0 (усі патчі накладаються на чисте дерево `v4.5.0`, задокументовані в [`docs/adr/`](https://github.com/nick-fedchik/Zephyr-RTOS-PYNC-Z1/tree/main/docs/adr) і перевірені на живому PYNQ-Z1):
+
+| Драйвер / підсистема | Патч / ADR | Перевірений результат на PYNQ-Z1 |
+|---|---|---|
+| DevCfg FPGA Manager (`fpga_zynq7000`, `0xF8007000`) + FAT microSD (`xlnx_sdhc`) | `0003`, `0010` / ADR `0001`, `0008` | Читання `base.bin` (4 045 564 байт) із microSD за ~2.5 с, PCAP DMA прошивка PL за **~50–51 мс**, AXI GPIO PL активний |
+| XADC (`0xF8007100`: die temp, rails, Arduino `A0–A5`, alarms/IRQ) | `0004`, `0009` / ADR `0002`, `0007` | **59.2 °C** (проти 59.4–59.9 °C у Linux `xilinx-xadc`), `VCCINT 1.021 В`, `VCCAUX 1.800 В`, входи `VAUX` і тривоги |
+| Cadence PS Watchdog (`wdt_cdns`, `0xF8005000`) + `hwinfo` / `sys_reboot()` | `0005`, `0008` / ADR `0003`, `0006` | Скид у межах 1% таймауту (0.5–60 с), `REBOOT_STATUS` (POR / SW / WDT), `kernel reboot cold` через `SLCR` |
+| PS QSPI NOR Flash (`0xE000D000`, 16 МБ) | `0006` / ADR `0004` | `jedec,spi-nor`: `ef 70 18` (`Winbond W25Q128JV`), `flash read/write/erase` до 256 КБ |
+| ARM PL330 PS DMA (`0xF8003000`, 8 каналів, L1 cache maint.) | `0007` / ADR `0005` | **114–158 MiB/s** (**1.1–2.6×** швидше за CPU `memcpy`), 317 нерівняних тестів, пройдено `tests/drivers/dma/loop_transfer` |
+
+---
+
+## 13. [TODO] Далі: апаратний PWM у FPGA PL і швидкісні канали між платами
 
 *(Розділ-заготовка — буде доповнений після тестів периферії.)*
 
@@ -477,17 +491,24 @@ OK rgb=0x12 (176.5 us)
 
 ## Скорочення
 
+- **ADR** (*Architecture Decision Record*) — короткий документ із фіксацією технічного рішення та його компромісів.
 - **AMP** (*Asymmetric Multiprocessing*) — асиметрична багатопроцесорність (різні ОС на різних ядрах одного чипа).
 - **AXI** (*Advanced eXtensible Interface*) — системна шина зв’язку між процесорною частиною PS і логікою FPGA (PL).
+- **DMA** (*Direct Memory Access*) — контролер прямого доступу до пам’яті в обхід CPU.
 - **DTB / DTBO / DTS** — скомпільований Device Tree, оверлей та його вихідний код.
 - **GIC / SGI** — контролер переривань ARM та програмне між’ядерне переривання (*Software Generated Interrupt*).
 - **IPC** (*Inter-Processor Communication*) — міжпроцесорний обмін даними.
+- **POR** (*Power-On Reset*) — скид по подачі живлення.
 - **PREEMPT_RT** — режим реального часу в ядрі Linux із витісненням критичних секцій та потоковими обробниками переривань.
+- **QSPI** (*Quad Serial Peripheral Interface*) — 4-лінійний інтерфейс NOR Flash.
 - **RPMsg** (*Remote Processor Messaging*) — протокол обміну повідомленнями поверх VirtIO vring.
 - **RTT** (*Round-Trip Time*) — повний час проходження запиту і відповіді.
 - **SCHED_FIFO** — політика планувальника реального часу POSIX (фіксований пріоритет без квантування часу).
 - **SCU** (*Snoop Control Unit*) — блок когерентності L1-кешів між ядрами Cortex-A9.
+- **SLCR** (*System Level Control Registers*) — системні регістри керування тактуванням і скидом Zynq-7000.
 - **VBAR** (*Vector Base Address Register*) — регістр базової адреси таблиці векторів виключень ARM.
+- **WDT** (*Watchdog Timer*) — апаратний сторожовий таймер.
+- **XADC** (*Xilinx Analog-to-Digital Converter*) — вбудований 12-бітний АЦП температури, напруг та аналогових входів Zynq-7000.
 
 ---
 
