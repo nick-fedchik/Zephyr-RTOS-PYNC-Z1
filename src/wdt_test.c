@@ -7,21 +7,20 @@
  *   wdt stop                    - disable the watchdog
  *   wdt run <ms> <seconds>      - feed at ms/4 for <seconds>, then stop
  *   wdt hang                    - stop feeding and print the time since the last feed
- *   wdt cause [clear]           - print (and optionally clear) the SLCR REBOOT_STATUS reset flags
+ *   wdt irqs                    - print the number of watchdog interrupts seen
+ *
+ * The reset cause is read with the generic `hwinfo` shell commands.
  */
 
 #include <stdlib.h>
 #include <string.h>
 #include <zephyr/device.h>
-#include <zephyr/drivers/syscon.h>
 #include <zephyr/drivers/watchdog.h>
 #include <zephyr/kernel.h>
 #include <zephyr/shell/shell.h>
 
-#define SLCR_REBOOT_STATUS 0x258
 
 static const struct device *const wdt_dev = DEVICE_DT_GET(DT_NODELABEL(watchdog0));
-static const struct device *const slcr_dev = DEVICE_DT_GET(DT_NODELABEL(slcr));
 
 static int wdt_channel = -1;
 static int64_t last_feed_ms;
@@ -139,28 +138,11 @@ static int cmd_wdt_hang(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-static int cmd_wdt_cause(const struct shell *sh, size_t argc, char **argv)
+static int cmd_wdt_irqs(const struct shell *sh, size_t argc, char **argv)
 {
-	uint32_t val;
-	int err = syscon_read_reg(slcr_dev, SLCR_REBOOT_STATUS, &val);
+	shell_print(sh, "wdt irq count = %u", irq_count);
 
-	if (err) {
-		shell_error(sh, "syscon_read_reg failed: %d", err);
-		return err;
-	}
-
-	shell_print(sh, "SLCR REBOOT_STATUS = 0x%08x (bit 16 = SWDT reset), wdt irq count = %u", val,
-		    irq_count);
-
-	if (argc > 1 && strcmp(argv[1], "clear") == 0) {
-		/* Keep the software state field [31:24], clear the persistent reset-cause flags */
-		err = syscon_write_reg(slcr_dev, SLCR_REBOOT_STATUS, val & 0xff000000U);
-		if (err) {
-			shell_error(sh, "syscon_write_reg failed: %d", err);
-		}
-	}
-
-	return err;
+	return 0;
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
@@ -170,7 +152,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD(stop, NULL, "Disable the watchdog", cmd_wdt_stop),
 	SHELL_CMD_ARG(run, NULL, "<ms> <seconds>", cmd_wdt_run, 3, 0),
 	SHELL_CMD(hang, NULL, "Stop feeding and print elapsed time", cmd_wdt_hang),
-	SHELL_CMD_ARG(cause, NULL, "[clear]", cmd_wdt_cause, 1, 1),
+	SHELL_CMD(irqs, NULL, "Print the watchdog interrupt count", cmd_wdt_irqs),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(wdt, &wdt_cmds, "Cadence PS watchdog test commands", NULL);

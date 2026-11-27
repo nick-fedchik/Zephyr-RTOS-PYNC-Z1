@@ -1,0 +1,178 @@
+diff --git a/drivers/hwinfo/CMakeLists.txt b/drivers/hwinfo/CMakeLists.txt
+index 03982ee5b92..3d47db9c26c 100644
+--- a/drivers/hwinfo/CMakeLists.txt
++++ b/drivers/hwinfo/CMakeLists.txt
+@@ -60,4 +60,5 @@ zephyr_library_sources_ifdef(CONFIG_HWINFO_SILABS_S3 hwinfo_silabs_series3.c)
+ zephyr_library_sources_ifdef(CONFIG_HWINFO_SMARTBOND hwinfo_smartbond.c)
+ zephyr_library_sources_ifdef(CONFIG_HWINFO_STM32 hwinfo_stm32.c)
+ zephyr_library_sources_ifdef(CONFIG_HWINFO_WCH hwinfo_wch.c)
++zephyr_library_sources_ifdef(CONFIG_HWINFO_ZYNQ7000 hwinfo_zynq7000.c)
+ # zephyr-keep-sorted-stop
+diff --git a/drivers/hwinfo/Kconfig b/drivers/hwinfo/Kconfig
+index 13eed6060e8..6e76dee7a3d 100644
+--- a/drivers/hwinfo/Kconfig
++++ b/drivers/hwinfo/Kconfig
+@@ -56,6 +56,7 @@ rsource "Kconfig.silabs"
+ rsource "Kconfig.smartbond"
+ rsource "Kconfig.stm32"
+ rsource "Kconfig.wch"
++rsource "Kconfig.zynq7000"
+ # zephyr-keep-sorted-stop
+ 
+ endif
+diff --git a/drivers/hwinfo/Kconfig.zynq7000 b/drivers/hwinfo/Kconfig.zynq7000
+new file mode 100644
+index 00000000000..8a4f9c035ac
+--- /dev/null
++++ b/drivers/hwinfo/Kconfig.zynq7000
+@@ -0,0 +1,9 @@
++# SPDX-License-Identifier: Apache-2.0
++
++config HWINFO_ZYNQ7000
++	bool "Xilinx Zynq-7000 reset cause"
++	default y
++	depends on SOC_FAMILY_XILINX_ZYNQ7000
++	select HWINFO_HAS_DRIVER
++	help
++	  Report the reset cause from the SLCR REBOOT_STATUS register.
+diff --git a/drivers/hwinfo/hwinfo_zynq7000.c b/drivers/hwinfo/hwinfo_zynq7000.c
+new file mode 100644
+index 00000000000..791ac8bb0b6
+--- /dev/null
++++ b/drivers/hwinfo/hwinfo_zynq7000.c
+@@ -0,0 +1,86 @@
++/*
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * hwinfo reset cause for the Xilinx Zynq-7000 PS, based on SLCR REBOOT_STATUS
++ * (UG585, Appendix B.28). The flags are sticky: they persist through every reset
++ * except power-on, so the cause of the latest reset is only unambiguous if the
++ * application clears them with hwinfo_clear_reset_cause() after reading.
++ */
++
++#include <errno.h>
++#include <zephyr/devicetree.h>
++#include <zephyr/drivers/hwinfo.h>
++#include <zephyr/sys/sys_io.h>
++#include <zephyr/sys/util.h>
++
++#define SLCR_BASE        DT_REG_ADDR(DT_NODELABEL(slcr))
++#define SLCR_LOCK        (SLCR_BASE + 0x004)
++#define SLCR_UNLOCK      (SLCR_BASE + 0x008)
++#define SLCR_LOCKSTA     (SLCR_BASE + 0x00c)
++#define SLCR_REBOOT_STAT (SLCR_BASE + 0x258)
++
++#define SLCR_LOCK_KEY   0x767b
++#define SLCR_UNLOCK_KEY 0xdf0d
++
++#define REBOOT_STATE_MASK GENMASK(31, 24) /* software scratch field, kept on clear */
++#define REBOOT_POR        BIT(22)
++#define REBOOT_SRST_B     BIT(21)
++#define REBOOT_DEBUG      BIT(20)
++#define REBOOT_SLC        BIT(19)
++#define REBOOT_AWDT1      BIT(18)
++#define REBOOT_AWDT0      BIT(17)
++#define REBOOT_SWDT       BIT(16)
++#define REBOOT_CAUSE_MASK GENMASK(22, 16)
++
++int z_impl_hwinfo_get_reset_cause(uint32_t *cause)
++{
++	uint32_t reg = sys_read32(SLCR_REBOOT_STAT);
++	uint32_t flags = 0;
++
++	if (reg & REBOOT_POR) {
++		flags |= RESET_POR;
++	}
++	if (reg & REBOOT_SRST_B) {
++		flags |= RESET_PIN;
++	}
++	if (reg & REBOOT_DEBUG) {
++		flags |= RESET_DEBUG;
++	}
++	if (reg & REBOOT_SLC) {
++		flags |= RESET_SOFTWARE;
++	}
++	if (reg & (REBOOT_AWDT0 | REBOOT_AWDT1 | REBOOT_SWDT)) {
++		flags |= RESET_WATCHDOG;
++	}
++
++	*cause = flags;
++
++	return 0;
++}
++
++int z_impl_hwinfo_clear_reset_cause(void)
++{
++	bool locked = sys_read32(SLCR_LOCKSTA) & BIT(0);
++	uint32_t reg;
++
++	if (locked) {
++		sys_write32(SLCR_UNLOCK_KEY, SLCR_UNLOCK);
++	}
++
++	reg = sys_read32(SLCR_REBOOT_STAT);
++	sys_write32(reg & ~REBOOT_CAUSE_MASK, SLCR_REBOOT_STAT);
++	reg = sys_read32(SLCR_REBOOT_STAT);
++
++	if (locked) {
++		sys_write32(SLCR_LOCK_KEY, SLCR_LOCK);
++	}
++
++	return (reg & REBOOT_CAUSE_MASK) ? -EIO : 0;
++}
++
++int z_impl_hwinfo_get_supported_reset_cause(uint32_t *supported)
++{
++	*supported = RESET_POR | RESET_PIN | RESET_DEBUG | RESET_SOFTWARE | RESET_WATCHDOG;
++
++	return 0;
++}
+diff --git a/soc/xlnx/zynq7000/CMakeLists.txt b/soc/xlnx/zynq7000/CMakeLists.txt
+index a6080f615e9..3060a7a28db 100644
+--- a/soc/xlnx/zynq7000/CMakeLists.txt
++++ b/soc/xlnx/zynq7000/CMakeLists.txt
+@@ -5,6 +5,7 @@
+ #
+ 
+ zephyr_sources(common/soc.c)
++zephyr_sources_ifdef(CONFIG_REBOOT common/reboot.c)
+ zephyr_include_directories(common)
+ 
+ set(SOC_LINKER_SCRIPT ${ZEPHYR_BASE}/include/zephyr/arch/arm/cortex_a_r/scripts/linker.ld CACHE INTERNAL "")
+diff --git a/soc/xlnx/zynq7000/common/reboot.c b/soc/xlnx/zynq7000/common/reboot.c
+new file mode 100644
+index 00000000000..68983b93504
+--- /dev/null
++++ b/soc/xlnx/zynq7000/common/reboot.c
+@@ -0,0 +1,31 @@
++/*
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * sys_reboot() for the Zynq-7000: SLCR PSS_RST_CTRL soft reset. The BootROM then
++ * runs again (SD/QSPI/JTAG per the boot mode pins), REBOOT_STATUS bit 19 is set.
++ */
++
++#include <zephyr/devicetree.h>
++#include <zephyr/irq.h>
++#include <zephyr/sys/reboot.h>
++#include <zephyr/sys/sys_io.h>
++
++#define SLCR_BASE         DT_REG_ADDR(DT_NODELABEL(slcr))
++#define SLCR_UNLOCK       (SLCR_BASE + 0x008)
++#define SLCR_PSS_RST_CTRL (SLCR_BASE + 0x200)
++
++#define SLCR_UNLOCK_KEY 0xdf0d
++#define PSS_RST_SOFT    BIT(0)
++
++void sys_arch_reboot(int type)
++{
++	ARG_UNUSED(type);
++
++	(void)irq_lock();
++
++	sys_write32(SLCR_UNLOCK_KEY, SLCR_UNLOCK);
++	sys_write32(PSS_RST_SOFT, SLCR_PSS_RST_CTRL);
++
++	for (;;) {
++	}
++}

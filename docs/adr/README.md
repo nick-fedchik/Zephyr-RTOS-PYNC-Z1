@@ -10,3 +10,4 @@ Decisions, Consequences, Verification, Open items. Documents are in English.
 | [0003](0003-cadence-ps-watchdog.md) | Cadence PS watchdog driver | Accepted |
 | [0004](0004-zynq7000-qspi-nor-flash.md) | Zynq-7000 PS QSPI controller and NOR flash | Accepted |
 | [0005](0005-zynq7000-ps-dma-pl330.md) | Zynq-7000 PS DMA controller (ARM PL330) driver | Accepted |
+| [0006](0006-zynq7000-hwinfo-reset-cause-and-reboot.md) | Zynq-7000 hwinfo reset cause and `sys_reboot()` | Accepted |

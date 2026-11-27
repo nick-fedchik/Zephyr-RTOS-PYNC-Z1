@@ -1,3 +1,4 @@
+#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/kernel.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_ip.h>
@@ -50,9 +51,36 @@ static void ipv4_event_handler(struct net_mgmt_event_callback *cb,
 	}
 }
 
+/* The SLCR reset flags are sticky, so report and clear them to get a per-boot cause */
+static void report_reset_cause(void)
+{
+	static const struct {
+		uint32_t flag;
+		const char *name;
+	} causes[] = {
+		{RESET_POR, "POR"},   {RESET_PIN, "PIN"},           {RESET_DEBUG, "DEBUG"},
+		{RESET_SOFTWARE, "SOFTWARE"}, {RESET_WATCHDOG, "WATCHDOG"},
+	};
+	uint32_t cause = 0;
+
+	if (hwinfo_get_reset_cause(&cause) != 0) {
+		return;
+	}
+
+	printk("Reset cause: 0x%02x", cause);
+	for (size_t i = 0; i < ARRAY_SIZE(causes); i++) {
+		if (cause & causes[i].flag) {
+			printk(" %s", causes[i].name);
+		}
+	}
+	printk("\n");
+	(void)hwinfo_clear_reset_cause();
+}
+
 int main(void)
 {
 	printk("Hello from Zephyr on PYNQ-Z1\n");
+	report_reset_cause();
 
 	net_mgmt_init_event_callback(&mgmt_cb, ipv4_event_handler,
 				     NET_EVENT_IPV4_ADDR_ADD);

@@ -43,7 +43,9 @@ Verified on hardware:
   through the standard `flash` API (`0006`, see
   [`docs/adr/0004-zynq7000-qspi-nor-flash.md`](docs/adr/0004-zynq7000-qspi-nor-flash.md)),
   and an interrupt-driven ARM PL330 PS DMA driver for memory-to-memory transfers
-  (`0007`, see [`docs/adr/0005-zynq7000-ps-dma-pl330.md`](docs/adr/0005-zynq7000-ps-dma-pl330.md)).
+  (`0007`, see [`docs/adr/0005-zynq7000-ps-dma-pl330.md`](docs/adr/0005-zynq7000-ps-dma-pl330.md)),
+  and a `hwinfo` reset-cause driver plus `sys_reboot()` through the SLCR
+  (`0008`, see [`docs/adr/0006-zynq7000-hwinfo-reset-cause-and-reboot.md`](docs/adr/0006-zynq7000-hwinfo-reset-cause-and-reboot.md)).
 
 > **Scope note:** This repository does not synthesize an FPGA bitstream or
 > `BOOT.BIN`. Instead, it reuses the verified `BOOT.BIN` (FSBL + U-Boot) from
@@ -175,8 +177,29 @@ Shell test commands:
 uart:~$ wdt run 2000 60      # feed a 2 s watchdog for 60 s, no reset
 uart:~$ wdt start 5000       # arm a 5 s watchdog
 uart:~$ wdt hang             # stop feeding; the board resets after ~5 s
-uart:~$ wdt cause            # SLCR REBOOT_STATUS (bit 16 = SWDT reset)
+uart:~$ wdt irqs             # number of watchdog interrupts seen
 ```
+
+The reset cause is read with the generic `hwinfo` shell and is also printed at
+boot (`Reset cause: 0x10 WATCHDOG`); see "Reset cause and reboot" below.
+
+## Reset cause and reboot
+
+The standalone build reports why the SoC was last reset through the generic
+`hwinfo` API (`CONFIG_HWINFO_ZYNQ7000`, SLCR `REBOOT_STATUS`) and implements
+`sys_reboot()` with the SLCR `PSS_RST_CTRL` soft reset. `main()` prints and clears
+the cause at every boot, because the flags are sticky except across power-on reset:
+
+```
+Reset cause: 0x08 POR          # after a power cycle
+Reset cause: 0x02 SOFTWARE     # after `kernel reboot cold`
+Reset cause: 0x10 WATCHDOG     # after `wdt start 500` + `wdt hang`
+uart:~$ hwinfo reset_cause get
+uart:~$ hwinfo reset_cause supported
+```
+
+After `kernel reboot cold` the board goes through BootROM and U-Boot again, so the
+TFTP netboot starts normally.
 
 ## QSPI NOR flash
 

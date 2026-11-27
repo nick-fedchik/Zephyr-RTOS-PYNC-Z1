@@ -107,7 +107,7 @@ APU watchdog 1). Clearing bits 23:16 before the test makes the cause unambiguous
 
 - The clock rate is a devicetree constant. A different PS clock configuration needs
   a changed `clock-frequency` (and `SLCR.WDT_CLK_SEL` is not touched).
-- No `hwinfo` reset-cause support yet (the cause is read with `wdt cause`).
+- ~~No `hwinfo` reset-cause support yet~~ Resolved by ADR 0006 (`hwinfo reset_cause`; `wdt cause` was removed).
 - `WDT_OPT_PAUSE_*` options are ignored (the SWDT keeps running while halted).
 - The patch stack (0001-0005) must be rebased on every Zephyr bump.
 
@@ -146,7 +146,7 @@ Other checks:
 
 ## Open items / follow-ups
 
-- `hwinfo` reset-cause support (`RESET_WATCHDOG`, using `REBOOT_STATUS`).
+- ~~`hwinfo` reset-cause support~~ Done in ADR 0006.
 - A `sys_reboot()` implementation for the SoC (`kernel reboot cold` currently ends
   in "Failed to reboot: spinning endlessly"), possibly through `SLCR.PSS_RST_CTRL`.
 - Derive the clock rate from the real PS clock configuration instead of a DT constant.
