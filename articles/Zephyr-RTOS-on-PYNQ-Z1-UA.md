@@ -388,17 +388,17 @@ Total wall time (parallel): 11574 us
 | Периферія PYNQ-Z1 (PS) | Стан у Zephyr 4.5.0 | Драйвер / примітка |
 |---|---|---|
 | `UART0` / `UART1` (USB-UART консоль) | Підтримується (перевірено) | `uart_xlnx_ps.c` (потрібен `pinctrl-0`) |
-| 1G Ethernet (`gem0` + MDIO, RTL8211F) | Підтримується (перевірено) | `eth_xlnx_gem.c`, `mdio_xlnx_gem.c` |
-| `pinctrl` (MIO/EMIO, банки 3.3 В / 1.8 В) | Підтримується (перевірено) | `pinctrl_xlnx_zynq.c` |
-| Таймери (Global Timer, TTC) і GICv1 | Підтримується (перевірено) | `arm_arch_timer`, `counter_xlnx_ttc.c` (+ патч SGI `#122600`) |
-| PS GPIO (MIO/EMIO) | Підтримується | `gpio_xlnx_ps.c`, `gpio_xlnx_ps_bank.c` |
-| I2C / SPI (Cadence PS) | Підтримується | `i2c_cdns.c`, `spi_cdns.c` |
-| microSD (`sdhci0`, Arasan) | Підтримується | `xlnx_sdhc.c` (`xlnx,versal-8.9a` у `zynq7000.dtsi`) |
-| USB Host / OTG (ChipIdea) | Не підтримується | Драйвера Zynq-7000 USB у Zephyr 4.5.0 немає |
-| QSPI Flash (16 МБ на платі) | Не підтримується | У Zephyr є `spi_xlnx_zynqmp_gqspi.c` (лише для ZynqMP) |
-| XADC (температура кристала, АЦП) | Не підтримується | Потрібен Linux (`xilinx-xadc`) або прямий доступ до регістрів |
-| PS DMA (`PL330`) і PS Watchdog | Не підтримується | У Zephyr є лише PL-версії (`AXI DMA`, `AXI WDT`) |
-| DevCfg FPGA Manager (прошивка PL) | Не підтримується | У Zephyr є лише `fpga_zynqmp.c` — бітстрім прошиває U-Boot або Linux |
+| 1G Ethernet (`gem0` + MDIO, RTL8211F) | Підтримується (перевірено) | `eth_xlnx_gem.c`, `mdio_xlnx_gem.c` (MDIO — шина керування PHY) |
+| `pinctrl` (MIO/EMIO, банки 3.3 В / 1.8 В) | Підтримується (перевірено) | `pinctrl_xlnx_zynq.c` (EMIO — виводи PS, прокинуті через PL) |
+| Таймери (Global Timer, TTC) і GICv1 | Підтримується (перевірено) | `arm_arch_timer`, `counter_xlnx_ttc.c` (TTC — *Triple Timer Counter*, + патч SGI `#122600`) |
+| PS GPIO (MIO/EMIO) | Підтримується | `gpio_xlnx_ps.c`, `gpio_xlnx_ps_bank.c` (лінії загального призначення) |
+| I2C / SPI (Cadence PS) | Підтримується | `i2c_cdns.c`, `spi_cdns.c` (послідовні шини сенсорів і периферії) |
+| microSD (`sdhci0`, Arasan) | Підтримується | `xlnx_sdhc.c` (SDHCI — контролер SD-карт, `xlnx,versal-8.9a` у `zynq7000.dtsi`) |
+| USB Host / OTG (ChipIdea) | Не підтримується | Драйвера Zynq-7000 USB (*On-The-Go*) у Zephyr 4.5.0 немає |
+| QSPI Flash (16 МБ на платі) | Не підтримується | У Zephyr є `spi_xlnx_zynqmp_gqspi.c` (лише для ZynqMP; QSPI — *Quad SPI*) |
+| XADC (температура кристала, АЦП) | Не підтримується | Вбудований АЦП Zynq; потрібен Linux (`xilinx-xadc`) або окремий драйвер |
+| PS DMA (`PL330`) і PS Watchdog | Не підтримується | У Zephyr є лише PL-версії (`AXI DMA` — прямий доступ до пам’яті, `AXI WDT` — сторожовий таймер) |
+| DevCfg FPGA Manager (прошивка PL) | Не підтримується в upstream 4.5.0 | *Device Configuration Interface*; в upstream є лише `fpga_zynqmp.c` (для Zynq-7000 потрібен окремий драйвер або прошивка через U-Boot/Linux) |
 
 ### Програмована логіка (FPGA PL — AXI IP-блоки)
 
@@ -427,30 +427,47 @@ Total wall time (parallel): 11574 us
 ## Скорочення
 
 - **AMP** (*Asymmetric Multiprocessing*) — асиметрична багатопроцесорність, коли на різних ядрах одного чипа працюють різні ОС.
+- **AXI** (*Advanced eXtensible Interface*) — системна шина зв’язку між процесорною частиною PS і програмованою логікою FPGA (PL).
 - **BDP** (*Bandwidth-Delay Product*) — добуток пропускної здатності каналу на затримку (RTT), що обмежує швидкість TCP при фіксованому розмірі вікна.
 - **BRAM** (*Block RAM*) — вбудована блочна пам’ять усередині FPGA.
+- **DAQ** (*Data Acquisition*) — високошвидкісний збір і оцифрування даних із сенсорів/АЦП.
 - **DDR3** — зовнішня динамічна оперативна пам’ять (на PYNQ-Z1 — 512 МБ, 32-бітна шина).
+- **DevCfg** (*Device Configuration Interface*) — апаратний контролер Zynq-7000 для прошивки бітстріму в FPGA PL через PCAP.
+- **DMA** (*Direct Memory Access*) — контролер прямого доступу до пам’яті в обхід CPU.
 - **DSP** (*Digital Signal Processing*) — апаратні блоки множення-накопичення у FPGA.
 - **DTS** (*Device Tree Source*) — текстовий опис апаратної конфігурації плати.
 - **ELF** (*Executable and Linkable Format*) — формат виконуваного файлу з метаданими секцій і точкою входу.
+- **EMIO** (*Extended Multiplexed I/O*) — розширені лінії вводу-виводу PS, маршрутизовані через піни FPGA PL.
 - **FPGA** (*Field-Programmable Gate Array*) — програмована логічна інтегральна схема.
 - **FSBL** (*First Stage Boot Loader*) — початковий завантажувач Zynq, що ініціалізує DDR, PLL і MIO.
 - **GEM** (*Gigabit Ethernet MAC*) — контролер гігабітного Ethernet у Zynq-7000.
 - **GIC** (*Generic Interrupt Controller*) — контролер переривань ARM (у Zynq-7000 — GICv1).
+- **GPIO** (*General-Purpose Input/Output*) — цифрові лінії вводу-виводу загального призначення.
 - **GTC** (*Global Timer Counter*) — глобальний 64-бітний таймер Cortex-A9 MPCore.
+- **I2C / IIC** (*Inter-Integrated Circuit*) — дводротова послідовна шина для підключення сенсорів і периферії.
 - **IPC / IPI** — міжпроцесорна комунікація / міжпроцесорне переривання (*Inter-Processor Interrupt*).
+- **MDIO** (*Management Data Input/Output*) — послідовна шина керування й діагностики фізичного рівня Ethernet (PHY).
 - **MIO** (*Multiplexed I/O*) — мультиплексовані виводи процесорної частини Zynq.
 - **MMU** (*Memory Management Unit*) — блок керування віртуальною пам’яттю.
+- **OTG** (*On-The-Go*) — режим USB, що дозволяє контролеру працювати як хост або пристрій.
 - **PL / PS** — програмована логіка (*Programmable Logic*) та процесорна система (*Processing System*) у Zynq.
+- **PWM** (*Pulse-Width Modulation*) — широтно-імпульсна модуляція.
+- **QSPI** (*Quad Serial Peripheral Interface*) — 4-лінійний швидкісний інтерфейс підключення NOR Flash.
 - **RTOS** (*Real-Time Operating System*) — операційна система реального часу.
 - **SCU** (*Snoop Control Unit*) — блок апаратної когерентності L1-кешів між ядрами Cortex-A9.
+- **SDHCI** (*Secure Digital Host Controller Interface*) — стандартний контролер SD/microSD-карт.
 - **SDK** (*Software Development Kit*) — набір компіляторів та утиліт (тут — Zephyr SDK `1.0.1`).
+- **SDR** (*Software-Defined Radio*) — програмно-визначуване радіо.
 - **SGI** (*Software Generated Interrupt*) — програмне між’ядерне переривання GIC (`INTID 0..15`).
 - **SMP** (*Symmetric Multiprocessing*) — симетрична багатопроцесорність, коли одна ОС планує потоки на всіх ядрах.
 - **SoC** (*System on Chip*) — система на кристалі.
+- **SPI** (*Serial Peripheral Interface*) — синхронна послідовна шина периферії.
 - **TFTP** (*Trivial File Transfer Protocol*) — простий протокол передачі файлів по UDP, підтримуваний U-Boot.
+- **TTC** (*Triple Timer Counter*) — апаратний триканальний таймер-лічильник у Zynq-7000 PS.
 - **UART** (*Universal Asynchronous Receiver-Transmitter*) — послідовний інтерфейс консолі.
+- **WDT** (*Watchdog Timer*) — апаратний сторожовий таймер, що перезавантажує систему при зависанні.
 - **WFE / SEV** (*Wait For Event / Send Event*) — інструкції ARM для низькоенергетичного очікування та пробудження ядра.
+- **XADC** (*Xilinx Analog-to-Digital Converter*) — вбудований 12-бітний АЦП у Zynq-7000 для контролю температури кристала, напруг живлення та аналогових входів.
 
 ---
 
