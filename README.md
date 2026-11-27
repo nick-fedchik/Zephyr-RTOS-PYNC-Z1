@@ -48,7 +48,10 @@ Verified on hardware:
   (`0008`, see [`docs/adr/0006-zynq7000-hwinfo-reset-cause-and-reboot.md`](docs/adr/0006-zynq7000-hwinfo-reset-cause-and-reboot.md)),
   and an extension of the XADC driver with the external analog inputs
   (Arduino A0-A5), threshold alarms and interrupts (`0009`, see
-  [`docs/adr/0007-zynq7000-xadc-aux-inputs-and-alarms.md`](docs/adr/0007-zynq7000-xadc-aux-inputs-and-alarms.md)).
+  [`docs/adr/0007-zynq7000-xadc-aux-inputs-and-alarms.md`](docs/adr/0007-zynq7000-xadc-aux-inputs-and-alarms.md)),
+  and fixes that make the stock Zephyr SDHC driver work on the Zynq-7000 so the PL
+  bitstream can be loaded from a FAT microSD card (`0010`, see
+  [`docs/adr/0008-zynq7000-pl-bitstream-from-sd.md`](docs/adr/0008-zynq7000-pl-bitstream-from-sd.md)).
 
 > **Scope note:** This repository does not synthesize an FPGA bitstream or
 > `BOOT.BIN`. Instead, it reuses the verified `BOOT.BIN` (FSBL + U-Boot) from
@@ -150,6 +153,26 @@ uart:~$ pl led 5                            # LD0-LD3 via PL AXI GPIO
 `fpga load devcfg@f8007000 <addr> <size>`, `fpga get_status` and `fpga reset`
 work as well. The staging window (`CONFIG_ZYNQ7000_FPGA_STAGING_ADDR/SIZE`) is
 MMU-mapped by the SoC code; use addresses inside it.
+
+### From a microSD card (no TFTP preload)
+
+Zephyr can also read the bitstream from the FAT partition of the microSD card
+(`JP4=SD`) with the Zephyr SDHC + FatFs stack. Copy `base.bin` to the root of the
+card (the PYNQ boot files stay untouched; the card is mounted read-only and never
+formatted), then:
+
+```
+uart:~$ pl loadfile                         # default /SD:/base.bin
+Reading /SD:/base.bin (4045564 bytes) into 0x05000000...
+Read 4045564 bytes in 2516 ms
+PL programmed in 47875 us, fpga_get_status()=1
+uart:~$ pl loadfile /SD:/other.bin          # any path on the card
+```
+
+A missing file, a directory, an empty file, a file larger than the staging window or an
+unreadable card gives a clear error and leaves the PL untouched. The MIO pins, card
+detect and SDIO clock come from the stock PYNQ `BOOT.BIN`. `setup_and_build.sh` fetches
+the `fatfs` west module for this. Details: [`docs/adr/0008-zynq7000-pl-bitstream-from-sd.md`](docs/adr/0008-zynq7000-pl-bitstream-from-sd.md).
 
 ## Reading die temperature and supply voltages (XADC)
 

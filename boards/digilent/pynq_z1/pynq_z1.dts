@@ -122,6 +122,25 @@
 	};
 };
 
+&sdhci_ref_clk {
+	/* SLCR SDIO_CLK_CTRL as left by the boot firmware: IO PLL 1000 MHz / 20 */
+	clock-frequency = <DT_FREQ_M(50)>;
+};
+
+&sdhc0 {
+	/*
+	 * microSD slot on MIO40-45 (SDIO0). The MIO mux, card-detect routing and SDIO reference
+	 * clock are programmed by the boot firmware (BootROM/FSBL/U-Boot boot from this slot).
+	 */
+	status = "okay";
+
+	sdmmc {
+		compatible = "zephyr,sdmmc-disk";
+		disk-name = "SD";
+		status = "okay";
+	};
+};
+
 &psgpio {
 	status = "okay";
 };

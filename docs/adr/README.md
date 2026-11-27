@@ -12,3 +12,4 @@ Decisions, Consequences, Verification, Open items. Documents are in English.
 | [0005](0005-zynq7000-ps-dma-pl330.md) | Zynq-7000 PS DMA controller (ARM PL330) driver | Accepted |
 | [0006](0006-zynq7000-hwinfo-reset-cause-and-reboot.md) | Zynq-7000 hwinfo reset cause and `sys_reboot()` | Accepted |
 | [0007](0007-zynq7000-xadc-aux-inputs-and-alarms.md) | Zynq-7000 XADC external inputs, alarms and interrupts | Accepted |
+| [0008](0008-zynq7000-pl-bitstream-from-sd.md) | Loading the PL bitstream from a FAT microSD card | Accepted |

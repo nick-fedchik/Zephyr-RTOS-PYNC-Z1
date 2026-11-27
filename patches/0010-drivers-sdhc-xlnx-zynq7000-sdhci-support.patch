@@ -1,0 +1,202 @@
+diff --git a/drivers/sdhc/xlnx_sdhc.c b/drivers/sdhc/xlnx_sdhc.c
+index b5082b9d50a..b3955f5daa7 100644
+--- a/drivers/sdhc/xlnx_sdhc.c
++++ b/drivers/sdhc/xlnx_sdhc.c
+@@ -29,6 +29,15 @@ LOG_MODULE_REGISTER(xlnx_sdhc, CONFIG_SD_LOG_LEVEL);
+ 
+ #define XLNX_SDHC_GET_HOST_PROP_BIT(cap, b) ((uint8_t)((cap & (CHECK_BITS(b))) >> b))
+ 
++/*
++ * The normal/error interrupt status, status-enable and signal-enable register pairs are
++ * 32-bit registers on the Zynq-7000 SDHCI: the normal half is in the low half-word and the error
++ * half in the high half-word. 16-bit stores to them are silently dropped, so always write the
++ * pair at once. Writing zero to a status half is harmless (write-1-to-clear).
++ */
++#define XLNX_SDHC_WRITE_INTR(field, normal, error)                                                \
++	(*(volatile uint32_t *)&(field) = ((uint32_t)(error) << 16) | (uint32_t)(normal))
++
+ #if defined(CONFIG_DCACHE_LINE_SIZE) && (CONFIG_DCACHE_LINE_SIZE > 0)
+ #define XLNX_SDHC_ADMA2_DESC_ALIGN CONFIG_DCACHE_LINE_SIZE
+ #else
+@@ -44,7 +53,12 @@ typedef struct {
+ 	/**< Length of current dma transfer max 64kb */
+ 	uint16_t length;
+ 	/**< source/destination address for current dma transfer */
++#ifdef CONFIG_SOC_FAMILY_XILINX_ZYNQ7000
++	/* The Zynq-7000 SDHCI has no 64-bit system bus support: 32-bit ADMA2, 8-byte descriptors */
++	uint32_t address;
++#else
+ 	uint64_t address;
++#endif
+ } __packed adma2_descriptor;
+ 
+ /**
+@@ -179,8 +193,8 @@ static int xlnx_sdhc_card_detect(const struct device *dev)
+  */
+ static void xlnx_sdhc_clear_intr(volatile struct reg_base *reg)
+ {
+-	reg->normal_int_stat = XLNX_SDHC_NORM_INTR_ALL;
+-	reg->err_int_stat = XLNX_SDHC_ERROR_INTR_ALL;
++	XLNX_SDHC_WRITE_INTR(reg->normal_int_stat, XLNX_SDHC_NORM_INTR_ALL,
++			     XLNX_SDHC_ERROR_INTR_ALL);
+ }
+ 
+ /**
+@@ -372,10 +386,10 @@ static int8_t xlnx_sdhc_cmd_response(const struct device *dev, struct sdhc_comma
+ 
+ 		if ((reg->normal_int_stat & XLNX_SDHC_INTR_ERR_MASK) != 0U) {
+ 			LOG_ERR("Error response from card");
+-			reg->err_int_stat = XLNX_SDHC_ERROR_INTR_ALL;
++			XLNX_SDHC_WRITE_INTR(reg->normal_int_stat, 0U, XLNX_SDHC_ERROR_INTR_ALL);
+ 			return -EINVAL;
+ 		}
+-		reg->normal_int_stat = XLNX_SDHC_INTR_CC_MASK;
++		XLNX_SDHC_WRITE_INTR(reg->normal_int_stat, XLNX_SDHC_INTR_CC_MASK, 0U);
+ 	} else {
+ 		timeout = K_MSEC(cmd->timeout_ms);
+ 
+@@ -496,12 +510,12 @@ static int8_t xlnx_sdhc_xfr(const struct device *dev, struct sdhc_data *data)
+ 		}
+ 
+ 		if ((reg->normal_int_stat & XLNX_SDHC_INTR_ERR_MASK) != 0U) {
+-			reg->err_int_stat = XLNX_SDHC_ERROR_INTR_ALL;
++			XLNX_SDHC_WRITE_INTR(reg->normal_int_stat, 0U, XLNX_SDHC_ERROR_INTR_ALL);
+ 			LOG_ERR("Error at data transfer");
+ 			return -EINVAL;
+ 		}
+ 
+-		reg->normal_int_stat = XLNX_SDHC_INTR_TC_MASK;
++		XLNX_SDHC_WRITE_INTR(reg->normal_int_stat, XLNX_SDHC_INTR_TC_MASK, 0U);
+ 	} else {
+ 		timeout = K_MSEC(data->timeout_ms);
+ 
+@@ -749,6 +763,13 @@ static int xlnx_sdhc_host_props(const struct device *dev, struct sdhc_host_props
+ 	props->host_caps.sdr50_support = XLNX_SDHC_GET_HOST_PROP_BIT(cap, XLNX_SDHC_SDR50_SUPPORT);
+ 	props->host_caps.slot_type = (uint8_t)((cap >> XLNX_SDHC_SLOT_TYPE_SHIFT) &
+ 			XLNX_SDHC_SLOT_TYPE_GET);
++#ifdef CONFIG_SOC_FAMILY_XILINX_ZYNQ7000
++	/*
++	 * The Zynq-7000 SDHCI always reports an "embedded" slot (capabilities[31:30] = 1), even
++	 * for a removable SD card. Treating it as eMMC rejects CMD8 (R7) and APP_CMD, so force SD.
++	 */
++	props->host_caps.slot_type = XLNX_SDHC_SD_SLOT;
++#endif
+ 	props->host_caps.bus_8_bit_support = XLNX_SDHC_GET_HOST_PROP_BIT(cap,
+ 			XLNX_SDHC_8BIT_SUPPORT);
+ 	props->bus_4_bit_support = XLNX_SDHC_GET_HOST_PROP_BIT(cap,
+@@ -1233,13 +1254,19 @@ static int8_t xlnx_sdhc_set_timing(const struct device *dev, enum sdhc_timing_mo
+ 		reg->host_ctrl2 |= mode;
+ 	}
+ 
+-	/* clock phase delays are different for SD 3.0 and EMMC 5.1 */
+-	if (dev_data->has_phy == true) {
+-		xlnx_sdhc_config_emmc_otap_delay(dev, timing);
+-		xlnx_sdhc_config_emmc_itap_delay(dev, timing);
+-	} else {
+-		xlnx_sdhc_config_sd_otap_delay(dev, timing);
+-		xlnx_sdhc_config_sd_itap_delay(dev, timing);
++	/*
++	 * Clock phase delays are different for SD 3.0 and EMMC 5.1. The Zynq-7000 SDHCI has
++	 * neither: the tap delay registers belong to the Versal SD wrapper, far outside the
++	 * controller's register window.
++	 */
++	if (!IS_ENABLED(CONFIG_SOC_FAMILY_XILINX_ZYNQ7000)) {
++		if (dev_data->has_phy == true) {
++			xlnx_sdhc_config_emmc_otap_delay(dev, timing);
++			xlnx_sdhc_config_emmc_itap_delay(dev, timing);
++		} else {
++			xlnx_sdhc_config_sd_otap_delay(dev, timing);
++			xlnx_sdhc_config_sd_itap_delay(dev, timing);
++		}
+ 	}
+ 
+ 	return 0;
+@@ -1333,25 +1360,28 @@ static int xlnx_sdhc_host_reset(const struct device *dev)
+ 	}
+ 
+ 	/* Enable status reg and configure interrupt */
+-	reg->normal_int_stat_en = XLNX_SDHC_NORM_INTR_ALL;
+-	reg->err_int_stat_en = XLNX_SDHC_ERROR_INTR_ALL;
+-	reg->err_int_signal_en = 0;
++	XLNX_SDHC_WRITE_INTR(reg->normal_int_stat_en, XLNX_SDHC_NORM_INTR_ALL,
++			     XLNX_SDHC_ERROR_INTR_ALL);
+ 
+ 	if (config->irq_config_func == NULL) {
+-		reg->normal_int_signal_en = 0;
++		XLNX_SDHC_WRITE_INTR(reg->normal_int_signal_en, 0U, 0U);
+ 	} else {
+ 		/*
+ 		 * Enable command complete, transfer complete, read buffer ready and error status
+ 		 * interrupt
+ 		 */
+-		reg->normal_int_signal_en = XLNX_SDHC_TXFR_INTR_EN_MASK;
++		XLNX_SDHC_WRITE_INTR(reg->normal_int_signal_en, XLNX_SDHC_TXFR_INTR_EN_MASK, 0U);
+ 	}
+ 
+ 	/* Data line time out interval */
+ 	reg->timeout_ctrl = XLNX_SDHC_DAT_LINE_TIMEOUT;
+ 
+ 	/* Select ADMA2 */
++#ifdef CONFIG_SOC_FAMILY_XILINX_ZYNQ7000
++	reg->host_ctrl1 = XLNX_SDHC_ADMA2_32;
++#else
+ 	reg->host_ctrl1 = XLNX_SDHC_ADMA2_64;
++#endif
+ 
+ 	reg->block_size = XLNX_SDHC_BLK_SIZE_512;
+ 
+@@ -1474,20 +1504,20 @@ static DEVICE_API(sdhc, xlnx_sdhc_api) = {
+ 		volatile struct reg_base *reg = (struct reg_base *)DEVICE_MMIO_GET(dev);          \
+ 		struct sd_data *dev_data = dev->data;                                             \
+ 		if ((reg->normal_int_stat & XLNX_SDHC_INTR_CC_MASK) != 0U) {                      \
+-			reg->normal_int_stat = XLNX_SDHC_INTR_CC_MASK;                            \
++			XLNX_SDHC_WRITE_INTR(reg->normal_int_stat, XLNX_SDHC_INTR_CC_MASK, 0U);   \
+ 			k_event_post(&dev_data->irq_event, XLNX_SDHC_INTR_CC_MASK);               \
+ 		}                                                                                 \
+ 		if ((reg->normal_int_stat & XLNX_SDHC_INTR_BRR_MASK) != 0U) {                     \
+-			reg->normal_int_stat = XLNX_SDHC_INTR_BRR_MASK;                           \
++			XLNX_SDHC_WRITE_INTR(reg->normal_int_stat, XLNX_SDHC_INTR_BRR_MASK, 0U);  \
+ 			k_event_post(&dev_data->irq_event, XLNX_SDHC_INTR_BRR_MASK);              \
+ 		}                                                                                 \
+ 		if ((reg->normal_int_stat & XLNX_SDHC_INTR_TC_MASK) != 0U) {                      \
+-			reg->normal_int_stat = XLNX_SDHC_INTR_TC_MASK;                            \
++			XLNX_SDHC_WRITE_INTR(reg->normal_int_stat, XLNX_SDHC_INTR_TC_MASK, 0U);   \
+ 			k_event_post(&dev_data->irq_event, XLNX_SDHC_INTR_TC_MASK);               \
+ 		}                                                                                 \
+ 		if ((reg->normal_int_stat & XLNX_SDHC_INTR_ERR_MASK) != 0U) {                     \
+-			reg->normal_int_stat = XLNX_SDHC_INTR_ERR_MASK;                           \
+-			reg->err_int_stat = XLNX_SDHC_ERROR_INTR_ALL;                             \
++			XLNX_SDHC_WRITE_INTR(reg->normal_int_stat, XLNX_SDHC_INTR_ERR_MASK,       \
++					     XLNX_SDHC_ERROR_INTR_ALL);                           \
+ 			k_event_post(&dev_data->irq_event, XLNX_SDHC_INTR_ERR_MASK);              \
+ 		}                                                                                 \
+ 	}                                                                                         \
+diff --git a/drivers/sdhc/xlnx_sdhc.h b/drivers/sdhc/xlnx_sdhc.h
+index 546da1c7f7d..794adbd8868 100644
+--- a/drivers/sdhc/xlnx_sdhc.h
++++ b/drivers/sdhc/xlnx_sdhc.h
+@@ -22,6 +22,7 @@
+ #define XLNX_SDHC_DESC_TRAN	BIT(5)
+ 
+ /* Bit map and constant values for ADMA2 Configuration */
++#define XLNX_SDHC_ADMA2_32		0x10U
+ #define XLNX_SDHC_ADMA2_64		0x18U
+ #define XLNX_SDHC_DESC_MAX_LENGTH	65536U
+ 
+diff --git a/soc/xlnx/zynq7000/common/soc.c b/soc/xlnx/zynq7000/common/soc.c
+index 0b06a5b2cdf..d4afbd788fe 100644
+--- a/soc/xlnx/zynq7000/common/soc.c
++++ b/soc/xlnx/zynq7000/common/soc.c
+@@ -79,6 +79,12 @@ static const struct arm_mmu_region mmu_regions[] = {
+ 			      0x1000,
+ 			      MT_STRONGLY_ORDERED | MPERM_R | MPERM_W),
+ #endif
++#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(sdhc0))
++	MMU_REGION_FLAT_ENTRY("sdhc0",
++			      DT_REG_ADDR(DT_NODELABEL(sdhc0)),
++			      0x1000,
++			      MT_STRONGLY_ORDERED | MPERM_R | MPERM_W),
++#endif
+ #if defined(CONFIG_ZYNQ7000_FPGA)
+ 	MMU_REGION_FLAT_ENTRY("pl_bitstream",
+ 			      CONFIG_ZYNQ7000_FPGA_STAGING_ADDR,

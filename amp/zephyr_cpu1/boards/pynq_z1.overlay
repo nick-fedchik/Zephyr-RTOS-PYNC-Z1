@@ -35,6 +35,10 @@
 	status = "disabled";
 };
 
+&sdhc0 {
+	status = "disabled";
+};
+
 &dmac_s {
 	status = "disabled";
 };
